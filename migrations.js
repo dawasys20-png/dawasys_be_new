@@ -108,15 +108,21 @@ async function runMigrations(client) {
           ADD COLUMN IF NOT EXISTS status TEXT CHECK (status IN ('active', 'expired', 'inactive'));
         `);
         // Update existing rows to have 'active' status if needed
-        await client.query(`UPDATE licenses SET status = 'active' WHERE status IS NULL`);
-        await client.query(`ALTER TABLE licenses ALTER COLUMN status SET NOT NULL`);
+        await client.query(
+          `UPDATE licenses SET status = 'active' WHERE status IS NULL`,
+        );
+        await client.query(
+          `ALTER TABLE licenses ALTER COLUMN status SET NOT NULL`,
+        );
       },
     },
 
     {
       name: "003_add_signature_to_licenses",
       up: async (client) => {
-        await client.query(`ALTER TABLE licenses ADD COLUMN IF NOT EXISTS signature TEXT;`);
+        await client.query(
+          `ALTER TABLE licenses ADD COLUMN IF NOT EXISTS signature TEXT;`,
+        );
       },
     },
 
@@ -268,7 +274,9 @@ async function runMigrations(client) {
             updatedAt TIMESTAMP NOT NULL
           );
         `);
-        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`);
+        await client.query(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);`,
+        );
       },
     },
 
@@ -311,23 +319,33 @@ async function runMigrations(client) {
     {
       name: "017_add_contactNumber_to_staff",
       up: async (client) => {
-        await client.query(`ALTER TABLE staff ADD COLUMN IF NOT EXISTS contactNumber TEXT;`);
+        await client.query(
+          `ALTER TABLE staff ADD COLUMN IF NOT EXISTS contactNumber TEXT;`,
+        );
       },
     },
 
     {
       name: "018_add_pharmacyId_to_medicines_and_transactions",
       up: async (client) => {
-        await client.query(`ALTER TABLE medicines ADD COLUMN IF NOT EXISTS pharmacyId UUID;`);
-        await client.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS pharmacyId UUID;`);
-        await client.query(`ALTER TABLE transactionItems ADD COLUMN IF NOT EXISTS pharmacyId UUID;`);
+        await client.query(
+          `ALTER TABLE medicines ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+        );
+        await client.query(
+          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+        );
+        await client.query(
+          `ALTER TABLE transactionItems ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+        );
       },
     },
 
     {
       name: "019_add_cashierId_to_transactions",
       up: async (client) => {
-        await client.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS cashierId UUID;`);
+        await client.query(
+          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS cashierId UUID;`,
+        );
       },
     },
 
@@ -335,24 +353,59 @@ async function runMigrations(client) {
       name: "020_add_foreign_keys_for_pharmacyId",
       up: async (client) => {
         await client.query(`
-          ALTER TABLE medicines
-          ADD CONSTRAINT IF NOT EXISTS fk_medicines_pharmacy
-          FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'fk_medicines_pharmacy'
+            ) THEN
+              ALTER TABLE medicines
+              ADD CONSTRAINT fk_medicines_pharmacy
+              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'fk_transactions_pharmacy'
+            ) THEN
+              ALTER TABLE transactions
+              ADD CONSTRAINT fk_transactions_pharmacy
+              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'fk_transactionItems_pharmacy'
+            ) THEN
+              ALTER TABLE transactionItems
+              ADD CONSTRAINT fk_transactionItems_pharmacy
+              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+              WHERE conname = 'fk_transactions_cashier'
+            ) THEN
+              ALTER TABLE transactions
+              ADD CONSTRAINT fk_transactions_cashier
+              FOREIGN KEY (cashierId) REFERENCES staff(id);
+            END IF;
+          END $$;
         `);
+      },
+    },
+
+    {
+      name: "021_add_contactNumber_to_pharmacyInfo",
+      up: async (client) => {
+        // Add contactNumber column if it doesn't exist
         await client.query(`
-          ALTER TABLE transactions
-          ADD CONSTRAINT IF NOT EXISTS fk_transactions_pharmacy
-          FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+          ALTER TABLE pharmacyInfo 
+          ADD COLUMN IF NOT EXISTS contactNumber TEXT;
         `);
+        
+        // Copy existing phone values to contactNumber for backward compatibility
         await client.query(`
-          ALTER TABLE transactionItems
-          ADD CONSTRAINT IF NOT EXISTS fk_transactionItems_pharmacy
-          FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
-        `);
-        await client.query(`
-          ALTER TABLE transactions
-          ADD CONSTRAINT IF NOT EXISTS fk_transactions_cashier
-          FOREIGN KEY (cashierId) REFERENCES staff(id);
+          UPDATE pharmacyInfo 
+          SET contactNumber = phone 
+          WHERE contactNumber IS NULL AND phone IS NOT NULL;
         `);
       },
     },
