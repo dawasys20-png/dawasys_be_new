@@ -22,45 +22,45 @@ async function runMigrations(client) {
           CREATE TABLE IF NOT EXISTS medicines (
             id UUID PRIMARY KEY,
             name TEXT NOT NULL,
-            unitType TEXT NOT NULL CHECK (unitType IN ('tablet', 'capsule', 'ml', 'vial')),
+            "unitType" TEXT NOT NULL CHECK ("unitType" IN ('tablet', 'capsule', 'ml', 'vial')),
             quantity INTEGER NOT NULL,
             boxes INTEGER,
-            stripsPerBox INTEGER,
-            unitsPerStrip INTEGER,
+            "stripsPerBox" INTEGER,
+            "unitsPerStrip" INTEGER,
             bottles INTEGER,
-            mlPerBottle INTEGER,
+            "mlPerBottle" INTEGER,
             price DECIMAL(10,2) NOT NULL,
-            lowStockThreshold INTEGER NOT NULL,
-            restockThreshold INTEGER NOT NULL,
-            expiryDate TIMESTAMP NOT NULL,
+            "lowStockThreshold" INTEGER NOT NULL,
+            "restockThreshold" INTEGER NOT NULL,
+            "expiryDate" TIMESTAMP NOT NULL,
             supplier TEXT,
-            batchNumber TEXT,
-            createdAt TIMESTAMP NOT NULL,
-            updatedAt TIMESTAMP NOT NULL
+            "batchNumber" TEXT,
+            "createdAt" TIMESTAMP NOT NULL,
+            "updatedAt" TIMESTAMP NOT NULL
           );
         `);
 
         await client.query(`
           CREATE TABLE IF NOT EXISTS transactions (
             id UUID PRIMARY KEY,
-            totalAmount DECIMAL(10,2) NOT NULL,
-            paymentMethod TEXT NOT NULL,
+            "totalAmount" DECIMAL(10,2) NOT NULL,
+            "paymentMethod" TEXT NOT NULL,
             date TIMESTAMP NOT NULL,
             notes TEXT,
-            createdAt TIMESTAMP NOT NULL
+            "createdAt" TIMESTAMP NOT NULL
           );
         `);
 
         await client.query(`
-          CREATE TABLE IF NOT EXISTS transactionItems (
+          CREATE TABLE IF NOT EXISTS "transactionItems" (
             id UUID PRIMARY KEY,
-            transactionId UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
-            medicineId UUID NOT NULL REFERENCES medicines(id),
-            medicineName TEXT NOT NULL,
-            unitType TEXT NOT NULL,
+            "transactionId" UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+            "medicineId" UUID NOT NULL REFERENCES medicines(id),
+            "medicineName" TEXT NOT NULL,
+            "unitType" TEXT NOT NULL,
             quantity INTEGER NOT NULL,
-            dosageInstructions TEXT,
-            unitPrice DECIMAL(10,2) NOT NULL,
+            "dosageInstructions" TEXT,
+            "unitPrice" DECIMAL(10,2) NOT NULL,
             subtotal DECIMAL(10,2) NOT NULL
           );
         `);
@@ -70,13 +70,13 @@ async function runMigrations(client) {
             id UUID PRIMARY KEY,
             key TEXT NOT NULL UNIQUE,
             type TEXT NOT NULL CHECK (type IN ('trial', 'purchased')),
-            licenseType TEXT NOT NULL,
+            "licenseType" TEXT NOT NULL,
             status TEXT NOT NULL CHECK (status IN ('active', 'expired')),
-            activationDate TIMESTAMP NOT NULL,
-            expiryDate TIMESTAMP,
-            maxMachines INTEGER NOT NULL,
-            machineIds TEXT NOT NULL,
-            createdAt TIMESTAMP NOT NULL
+            "activationDate" TIMESTAMP NOT NULL,
+            "expiryDate" TIMESTAMP,
+            "maxMachines" INTEGER NOT NULL,
+            "machineIds" TEXT NOT NULL,
+            "createdAt" TIMESTAMP NOT NULL
           );
         `);
 
@@ -89,13 +89,13 @@ async function runMigrations(client) {
         `);
 
         await client.query(`
-          CREATE INDEX IF NOT EXISTS idx_medicines_expiryDate ON medicines(expiryDate);
+          CREATE INDEX IF NOT EXISTS "idx_medicines_expiryDate" ON medicines("expiryDate");
         `);
         await client.query(`
           CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
         `);
         await client.query(`
-          CREATE INDEX IF NOT EXISTS idx_transactionItems_transactionId ON transactionItems(transactionId);
+          CREATE INDEX IF NOT EXISTS "idx_transactionItems_transactionId" ON "transactionItems"("transactionId");
         `);
       },
     },
@@ -131,7 +131,7 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS unitBuyingPrice DECIMAL(10,2) NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "unitBuyingPrice" DECIMAL(10,2) NOT NULL DEFAULT 0;
         `);
       },
     },
@@ -141,7 +141,7 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS isDeleted INTEGER NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "isDeleted" INTEGER NOT NULL DEFAULT 0;
         `);
       },
     },
@@ -151,11 +151,11 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS wholesaleStripPrice DECIMAL(10,2) NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "wholesaleStripPrice" DECIMAL(10,2) NOT NULL DEFAULT 0;
         `);
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS wholesaleBoxPrice DECIMAL(10,2) NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "wholesaleBoxPrice" DECIMAL(10,2) NOT NULL DEFAULT 0;
         `);
       },
     },
@@ -175,7 +175,7 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE transactions
-          ADD COLUMN IF NOT EXISTS transactionType TEXT;
+          ADD COLUMN IF NOT EXISTS "transactionType" TEXT;
         `);
       },
     },
@@ -184,8 +184,8 @@ async function runMigrations(client) {
       name: "009_add_stockQuantity_to_transactionItems",
       up: async (client) => {
         await client.query(`
-          ALTER TABLE transactionItems
-          ADD COLUMN IF NOT EXISTS stockQuantity INTEGER NOT NULL DEFAULT 0;
+          ALTER TABLE "transactionItems"
+          ADD COLUMN IF NOT EXISTS "stockQuantity" INTEGER NOT NULL DEFAULT 0;
         `);
       },
     },
@@ -195,11 +195,11 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS buyingPrice DECIMAL(10,2) NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "buyingPrice" DECIMAL(10,2) NOT NULL DEFAULT 0;
         `);
         await client.query(`
           ALTER TABLE medicines
-          ADD COLUMN IF NOT EXISTS sellingPrice DECIMAL(10,2) NOT NULL DEFAULT 0;
+          ADD COLUMN IF NOT EXISTS "sellingPrice" DECIMAL(10,2) NOT NULL DEFAULT 0;
         `);
       },
     },
@@ -208,18 +208,18 @@ async function runMigrations(client) {
       name: "010_add_inventory_movements_table",
       up: async (client) => {
         await client.query(`
-          CREATE TABLE IF NOT EXISTS inventory_movements (
+          CREATE TABLE IF NOT EXISTS "inventory_movements" (
             id UUID PRIMARY KEY,
-            medicineId UUID NOT NULL,
+            "medicineId" UUID NOT NULL,
             quantity INTEGER NOT NULL,
-            unitType TEXT NOT NULL,
-            movementType TEXT NOT NULL,
-            createdAt TIMESTAMP NOT NULL
+            "unitType" TEXT NOT NULL,
+            "movementType" TEXT NOT NULL,
+            "createdAt" TIMESTAMP NOT NULL
           );
         `);
         await client.query(`
-          CREATE INDEX IF NOT EXISTS idx_inventory_movements_medicineId
-          ON inventory_movements(medicineId);
+          CREATE INDEX IF NOT EXISTS "idx_inventory_movements_medicineId"
+          ON "inventory_movements"("medicineId");
         `);
       },
     },
@@ -229,7 +229,7 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE transactions
-          ADD COLUMN IF NOT EXISTS packType TEXT NOT NULL DEFAULT 'unit';
+          ADD COLUMN IF NOT EXISTS "packType" TEXT NOT NULL DEFAULT 'unit';
         `);
       },
     },
@@ -240,12 +240,12 @@ async function runMigrations(client) {
         // PostgreSQL doesn't support directly modifying CHECK constraints
         // We need to drop and recreate the constraint
         await client.query(`
-          ALTER TABLE medicines DROP CONSTRAINT IF EXISTS medicines_unitType_check;
+          ALTER TABLE medicines DROP CONSTRAINT IF EXISTS "medicines_unitType_check";
         `);
         await client.query(`
           ALTER TABLE medicines
-          ADD CONSTRAINT medicines_unitType_check
-          CHECK (unitType IN (
+          ADD CONSTRAINT "medicines_unitType_check"
+          CHECK ("unitType" IN (
             'tablet', 'capsule', 'syrup', 'suspension', 'solution',
             'injection', 'drops', 'cream', 'ointment', 'lotion', 'gel',
             'suppository', 'powder', 'inhaler', 'spray', 'sachet', 'ml', 'vial', 'custom'
@@ -270,8 +270,8 @@ async function runMigrations(client) {
             username TEXT NOT NULL,
             phone TEXT NOT NULL,
             password TEXT NOT NULL,
-            createdAt TIMESTAMP NOT NULL,
-            updatedAt TIMESTAMP NOT NULL
+            "createdAt" TIMESTAMP NOT NULL,
+            "updatedAt" TIMESTAMP NOT NULL
           );
         `);
         await client.query(
@@ -284,15 +284,15 @@ async function runMigrations(client) {
       name: "015_add_pharmacy_info_table",
       up: async (client) => {
         await client.query(`
-          CREATE TABLE IF NOT EXISTS pharmacyInfo (
+          CREATE TABLE IF NOT EXISTS "pharmacyInfo" (
             id UUID PRIMARY KEY,
             name TEXT NOT NULL,
             address TEXT NOT NULL,
             phone TEXT,
             email TEXT,
-            userId UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            createdAt TIMESTAMP NOT NULL,
-            updatedAt TIMESTAMP NOT NULL
+            "userId" UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            "createdAt" TIMESTAMP NOT NULL,
+            "updatedAt" TIMESTAMP NOT NULL
           );
         `);
       },
@@ -304,13 +304,13 @@ async function runMigrations(client) {
         await client.query(`
           CREATE TABLE IF NOT EXISTS staff (
             id UUID PRIMARY KEY,
-            userName TEXT NOT NULL,
+            "userName" TEXT NOT NULL,
             pin TEXT NOT NULL,
             role TEXT NOT NULL CHECK (role IN ('admin', 'pharmacist', 'cashier', 'technician')),
-            pharmacyId UUID NOT NULL REFERENCES pharmacyInfo(id) ON DELETE CASCADE,
-            contactNumber TEXT,
-            createdAt TIMESTAMP NOT NULL,
-            updatedAt TIMESTAMP NOT NULL
+            "pharmacyId" UUID NOT NULL REFERENCES "pharmacyInfo"(id) ON DELETE CASCADE,
+            "contactNumber" TEXT,
+            "createdAt" TIMESTAMP NOT NULL,
+            "updatedAt" TIMESTAMP NOT NULL
           );
         `);
       },
@@ -320,7 +320,7 @@ async function runMigrations(client) {
       name: "017_add_contactNumber_to_staff",
       up: async (client) => {
         await client.query(
-          `ALTER TABLE staff ADD COLUMN IF NOT EXISTS contactNumber TEXT;`,
+          `ALTER TABLE staff ADD COLUMN IF NOT EXISTS "contactNumber" TEXT;`,
         );
       },
     },
@@ -329,13 +329,13 @@ async function runMigrations(client) {
       name: "018_add_pharmacyId_to_medicines_and_transactions",
       up: async (client) => {
         await client.query(
-          `ALTER TABLE medicines ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+          `ALTER TABLE medicines ADD COLUMN IF NOT EXISTS "pharmacyId" UUID;`,
         );
         await client.query(
-          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS "pharmacyId" UUID;`,
         );
         await client.query(
-          `ALTER TABLE transactionItems ADD COLUMN IF NOT EXISTS pharmacyId UUID;`,
+          `ALTER TABLE "transactionItems" ADD COLUMN IF NOT EXISTS "pharmacyId" UUID;`,
         );
       },
     },
@@ -344,7 +344,7 @@ async function runMigrations(client) {
       name: "019_add_cashierId_to_transactions",
       up: async (client) => {
         await client.query(
-          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS cashierId UUID;`,
+          `ALTER TABLE transactions ADD COLUMN IF NOT EXISTS "cashierId" UUID;`,
         );
       },
     },
@@ -361,7 +361,7 @@ async function runMigrations(client) {
             ) THEN
               ALTER TABLE medicines
               ADD CONSTRAINT fk_medicines_pharmacy
-              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+              FOREIGN KEY ("pharmacyId") REFERENCES "pharmacyInfo"(id);
             END IF;
             IF NOT EXISTS (
               SELECT 1 FROM pg_constraint
@@ -369,23 +369,23 @@ async function runMigrations(client) {
             ) THEN
               ALTER TABLE transactions
               ADD CONSTRAINT fk_transactions_pharmacy
-              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+              FOREIGN KEY ("pharmacyId") REFERENCES "pharmacyInfo"(id);
             END IF;
             IF NOT EXISTS (
               SELECT 1 FROM pg_constraint
               WHERE conname = 'fk_transactionItems_pharmacy'
             ) THEN
-              ALTER TABLE transactionItems
+              ALTER TABLE "transactionItems"
               ADD CONSTRAINT fk_transactionItems_pharmacy
-              FOREIGN KEY (pharmacyId) REFERENCES pharmacyInfo(id);
+              FOREIGN KEY ("pharmacyId") REFERENCES "pharmacyInfo"(id);
             END IF;
             IF NOT EXISTS (
               SELECT 1 FROM pg_constraint
               WHERE conname = 'fk_transactions_cashier'
             ) THEN
               ALTER TABLE transactions
-              ADD CONSTRAINT fk_transactions_cashier
-              FOREIGN KEY (cashierId) REFERENCES staff(id);
+              ADD CONSTRAINT fk_transactions_cashier 
+              FOREIGN KEY ("cashierId") REFERENCES staff(id);
             END IF;
           END $$;
         `);
@@ -397,15 +397,15 @@ async function runMigrations(client) {
       up: async (client) => {
         // Add contactNumber column if it doesn't exist
         await client.query(`
-          ALTER TABLE pharmacyInfo 
-          ADD COLUMN IF NOT EXISTS contactNumber TEXT;
+          ALTER TABLE "pharmacyInfo"
+          ADD COLUMN IF NOT EXISTS "contactNumber" TEXT;
         `);
-        
+
         // Copy existing phone values to contactNumber for backward compatibility
         await client.query(`
-          UPDATE pharmacyInfo 
-          SET contactNumber = phone 
-          WHERE contactNumber IS NULL AND phone IS NOT NULL;
+          UPDATE "pharmacyInfo" 
+          SET "contactNumber" = phone 
+          WHERE "contactNumber" IS NULL AND phone IS NOT NULL;
         `);
       },
     },

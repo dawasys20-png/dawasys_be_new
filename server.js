@@ -53,20 +53,20 @@ async function query(text, params) {
 async function getMedicines(pharmacyId) {
   if (pharmacyId) {
     const result = await query(
-      "SELECT * FROM medicines WHERE isDeleted = 0 AND pharmacyId = $1 ORDER BY name",
+      'SELECT * FROM medicines WHERE "isDeleted" = 0 AND "pharmacyId" = $1 ORDER BY name',
       [pharmacyId],
     );
     return result.rows;
   }
   const result = await query(
-    "SELECT * FROM medicines WHERE isDeleted = 0 ORDER BY name",
+    'SELECT * FROM medicines WHERE "isDeleted" = 0 ORDER BY name',
   );
   return result.rows;
 }
 
 async function getMedicineById(id) {
   const result = await query(
-    "SELECT * FROM medicines WHERE id = $1 AND isDeleted = 0",
+    'SELECT * FROM medicines WHERE id = $1 AND "isDeleted" = 0',
     [id],
   );
   return result.rows[0] || null;
@@ -84,11 +84,11 @@ async function addMedicine(m) {
   await query(
     `
     INSERT INTO medicines (
-      id, name, unitType, quantity, boxes, stripsPerBox, unitsPerStrip,
-      bottles, mlPerBottle, price, lowStockThreshold, restockThreshold,
-      expiryDate, supplier, batchNumber, unitBuyingPrice, isDeleted,
-      wholesaleStripPrice, wholesaleBoxPrice, createdAt, updatedAt,
-      buyingPrice, sellingPrice, pharmacyId
+      id, name, "unitType", quantity, boxes, "stripsPerBox", "unitsPerStrip",
+      bottles, "mlPerBottle", price, "lowStockThreshold", "restockThreshold",
+      "expiryDate", supplier, "batchNumber", "unitBuyingPrice", "isDeleted",
+      "wholesaleStripPrice", "wholesaleBoxPrice", "createdAt", "updatedAt",
+      "buyingPrice", "sellingPrice", "pharmacyId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
   `,
     [
@@ -140,12 +140,12 @@ async function updateMedicine(id, updates) {
   await query(
     `
     UPDATE medicines SET
-      name=$1, unitType=$2, quantity=$3, boxes=$4, stripsPerBox=$5,
-      unitsPerStrip=$6, bottles=$7, mlPerBottle=$8, price=$9,
-      lowStockThreshold=$10, restockThreshold=$11, expiryDate=$12,
-      supplier=$13, batchNumber=$14, unitBuyingPrice=$15,
-      wholesaleStripPrice=$16, wholesaleBoxPrice=$17, updatedAt=$18,
-      buyingPrice=$19, sellingPrice=$20, pharmacyId=$21
+      name=$1, "unitType"=$2, quantity=$3, boxes=$4, "stripsPerBox"=$5,
+      "unitsPerStrip"=$6, bottles=$7, "mlPerBottle"=$8, price=$9,
+      "lowStockThreshold"=$10, "restockThreshold"=$11, "expiryDate"=$12,
+      supplier=$13, "batchNumber"=$14, "unitBuyingPrice"=$15,
+      "wholesaleStripPrice"=$16, "wholesaleBoxPrice"=$17, "updatedAt"=$18,
+      "buyingPrice"=$19, "sellingPrice"=$20, "pharmacyId"=$21
     WHERE id=$22
   `,
     [
@@ -178,7 +178,7 @@ async function updateMedicine(id, updates) {
 }
 
 async function deleteMedicine(id) {
-  await query("UPDATE medicines SET isDeleted=1 WHERE id=$1", [id]);
+  await query('UPDATE medicines SET "isDeleted"=1 WHERE id=$1', [id]);
 }
 
 // Transactions
@@ -203,8 +203,8 @@ async function addTransaction(tx) {
   await query(
     `
     INSERT INTO transactions (
-      id, totalAmount, paymentMethod, date, notes, createdAt,
-      profit, transactionType, packType, pharmacyId, cashierId
+      id, "totalAmount", "paymentMethod", date, notes, "createdAt",
+      profit, "transactionType", "packType", "pharmacyId", "cashierId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `,
     [
@@ -223,9 +223,9 @@ async function addTransaction(tx) {
   );
 
   const itemStmt = `
-    INSERT INTO transactionItems (
-      id, transactionId, medicineId, medicineName, unitType, quantity,
-      dosageInstructions, unitPrice, subtotal, stockQuantity, pharmacyId
+    INSERT INTO "transactionItems" (
+      id, "transactionId", "medicineId", "medicineName", "unitType", quantity,
+      "dosageInstructions", "unitPrice", "subtotal", "stockQuantity", "pharmacyId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `;
 
@@ -253,7 +253,7 @@ async function addTransaction(tx) {
       const medicine = await getMedicineById(item.medicineId);
       if (medicine) {
         await query(
-          "UPDATE medicines SET quantity = quantity - $1, updatedAt = $2 WHERE id = $3",
+          'UPDATE medicines SET quantity = quantity - $1, "updatedAt" = $2 WHERE id = $3',
           [item.stockQuantity, now, item.medicineId],
         );
       }
@@ -283,7 +283,7 @@ async function getTransactions(pharmacyId) {
   let transactions;
   if (pharmacyId) {
     const result = await query(
-      "SELECT * FROM transactions WHERE pharmacyId = $1 ORDER BY date ASC",
+      'SELECT * FROM transactions WHERE "pharmacyId" = $1 ORDER BY date ASC',
       [pharmacyId],
     );
     transactions = result.rows;
@@ -295,7 +295,7 @@ async function getTransactions(pharmacyId) {
   // Fetch items for each transaction
   for (const tx of transactions) {
     const itemsResult = await query(
-      "SELECT * FROM transactionItems WHERE transactionId = $1",
+      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
       [tx.id],
     );
     tx.items = itemsResult.rows;
@@ -305,7 +305,7 @@ async function getTransactions(pharmacyId) {
 
 async function deleteTransaction(id) {
   const itemsResult = await query(
-    "SELECT * FROM transactionItems WHERE transactionId = $1",
+    'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
     [id],
   );
   const items = itemsResult.rows;
@@ -316,7 +316,7 @@ async function deleteTransaction(id) {
     for (const item of items) {
       // Restock the medicine
       await query(
-        "UPDATE medicines SET quantity = quantity + $1, updatedAt = $2 WHERE id = $3",
+        'UPDATE medicines SET quantity = quantity + $1, "updatedAt" = $2 WHERE id = $3',
         [item.stockQuantity, new Date().toISOString(), item.medicineId],
       );
 
@@ -340,6 +340,24 @@ async function deleteTransaction(id) {
   }
 }
 
+async function getTransactionsByCashierId(cashierId) {
+  const result = await query(
+    'SELECT * FROM transactions WHERE "cashierId" = $1 ORDER BY date ASC',
+    [cashierId],
+  );
+  const transactions = result.rows;
+
+  // Fetch items for each transaction
+  for (const tx of transactions) {
+    const itemsResult = await query(
+      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
+      [tx.id],
+    );
+    tx.items = itemsResult.rows;
+  }
+  return transactions;
+}
+
 // Licenses
 async function saveLicense(license) {
   const id = crypto.randomUUID();
@@ -348,8 +366,8 @@ async function saveLicense(license) {
   await query(
     `
     INSERT INTO licenses (
-      id, key, type, licenseType, status, activationDate,
-      expiryDate, maxMachines, machineIds, signature, createdAt
+      id, key, type, "licenseType", status, "activationDate",
+      "expiryDate", "maxMachines", "machineIds", signature, "createdAt"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `,
     [
@@ -372,7 +390,7 @@ async function saveLicense(license) {
 
 async function getLicense() {
   const result = await query(
-    "SELECT * FROM licenses ORDER BY createdAt DESC LIMIT 1",
+    'SELECT * FROM licenses ORDER BY "createdAt" DESC LIMIT 1',
   );
   return result.rows[0] || null;
 }
@@ -381,8 +399,8 @@ async function getLicense() {
 async function saveSetting(key, value) {
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO settings (key, value, updatedAt) VALUES ($1, $2, $3) " +
-      "ON CONFLICT (key) DO UPDATE SET value = $2, updatedAt = $3",
+    'INSERT INTO settings (key, value, "updatedAt") VALUES ($1, $2, $3) ' +
+      'ON CONFLICT (key) DO UPDATE SET value = $2, "updatedAt" = $3',
     [key, value, now],
   );
 }
@@ -396,7 +414,7 @@ async function getSetting(key) {
 
 async function getInventoryMovements() {
   const result = await query(
-    "SELECT * FROM inventory_movements ORDER BY date DESC",
+    'SELECT * FROM "inventory_movements" ORDER BY date DESC',
   );
   return result.rows;
 }
@@ -405,7 +423,7 @@ async function addInventoryMovementRaw(client, movement) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await client.query(
-    "INSERT INTO inventory_movements (id, medicineId, quantity, unitType, movementType, createdAt) " +
+    'INSERT INTO "inventory_movements" (id, "medicineId", quantity, "unitType", "movementType", "createdAt") ' +
       "VALUES ($1, $2, $3, $4, $5, $6)",
     [
       id,
@@ -424,12 +442,12 @@ async function addInventoryMovement(movement) {
 }
 
 async function deleteInventoryMovement(id) {
-  await query("DELETE FROM inventory_movements WHERE id = $1", [id]);
+  await query('DELETE FROM "inventory_movements" WHERE id = $1', [id]);
 }
 
 async function getInventoryMovementsByMedicineId(medicineId) {
   const result = await query(
-    "SELECT * FROM inventory_movements WHERE medicineId = $1 ORDER BY date DESC",
+    'SELECT * FROM "inventory_movements" WHERE "medicineId" = $1 ORDER BY date DESC',
     [medicineId],
   );
   return result.rows;
@@ -497,9 +515,10 @@ app.post("/api/register", async (req, res) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO users (id, username, password, phone, createdAt, updatedAt) VALUES ($1, $2, $3, $4, $5, $6)",
+    'INSERT INTO users (id, username, password, phone, "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6)',
     [id, username, hashPassword(password), phone, now, now],
   );
+
   res.json({ id, username, phone, createdAt: now, updatedAt: now });
 });
 
@@ -509,7 +528,7 @@ app.post("/api/pharmacy", authMiddleware, async (req, res) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO pharmacyInfo (id, name, address, contactNumber, createdAt, userId) VALUES ($1, $2, $3, $4, $5, $6)",
+    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", "createdAt", "userId") VALUES ($1, $2, $3, $4, $5, $6)',
     [id, name, address, contactNumber, now, req.user.id],
   );
   res.json({ id, name, address, contactNumber, createdAt: now });
@@ -551,6 +570,11 @@ app.delete("/api/transactions/:id", async (req, res) => {
   res.json({ success: true });
 });
 
+// cashier transactions
+app.get("/api/transactions/cashier/:cashierId", async (req, res) =>
+  res.json(await getTransactionsByCashierId(req.params.cashierId)),
+);
+
 // Licenses
 app.get("/api/license", async (req, res) =>
   res.json((await getLicense()) || null),
@@ -589,27 +613,57 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
   const userId = req.user.id;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+
   await query(
-    "INSERT INTO pharmacyInfo (id, name, address, contactNumber, phone, email, userId, createdAt, updatedAt) " +
+    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt") ' +
       "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     [id, name, address, contactNumber, phone, email, userId, now, now],
   );
+
+  // Check if first pharmacy for user, create admin staff
+  const result = await query(
+    'SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1',
+    [userId],
+  );
+  const pharmacyCount = parseInt(result.rows[0].count, 10);
+  if (pharmacyCount === 1) {
+    const staffId = crypto.randomUUID();
+    const hashedPin = hashPassword("1234"); // Default PIN, should be changed by user
+    await query(
+      'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      [
+        staffId,
+        req.user.username,
+        "admin",
+        contactNumber || null,
+        hashedPin,
+        id,
+        now,
+        now,
+      ],
+    );
+  }
+
   res.json({
-    id,
-    name,
-    address,
-    contactNumber,
-    phone,
-    email,
-    createdAt: now,
-    updatedAt: now,
+    data: {
+      id,
+      name,
+      address,
+      contactNumber,
+      phone,
+      email,
+      createdAt: now,
+      updatedAt: now,
+    },
+    staffId: pharmacyCount === 1 ? staffId : null,
   });
 });
 
 // Get pharmacy by user ID
 app.get("/api/pharmacy", authMiddleware, async (req, res) => {
   const result = await query(
-    "SELECT * FROM pharmacyInfo WHERE userId = $1 ORDER BY createdAt DESC",
+    'SELECT * FROM "pharmacyInfo" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
     [req.user.id],
   );
   const pharmacy = result.rows[0];
@@ -620,11 +674,8 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
 
 // Get all pharmacies
 app.get("/api/pharmacies", async (req, res) => {
-  const result = await query("SELECT * FROM pharmacyInfo");
+  const result = await query('SELECT * FROM "pharmacyInfo"');
 
-  console.log("====================================");
-  console.log(result.rows);
-  console.log("====================================");
   res.json(result.rows);
 });
 
@@ -641,7 +692,7 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
   const hashedPin = hashPassword(pin);
   await query(
-    "INSERT INTO staff (id, userName, role, contactNumber, pin, pharmacyId, createdAt, updatedAt) " +
+    'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
       "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     [id, userName, role, contactNumber, hashedPin, pharmacyId, now, now],
   );
@@ -660,7 +711,7 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
 // Get staff by pharmacy ID
 app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
   const result = await query(
-    "SELECT * FROM staff WHERE pharmacyId = $1 ORDER BY createdAt DESC",
+    'SELECT * FROM staff WHERE "pharmacyId" = $1 ORDER BY "createdAt" DESC',
     [req.params.pharmacyId],
   );
   const staff = result.rows;
