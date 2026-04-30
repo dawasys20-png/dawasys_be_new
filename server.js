@@ -626,8 +626,9 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
     [userId],
   );
   const pharmacyCount = parseInt(result.rows[0].count, 10);
+  let staffId;
   if (pharmacyCount === 1) {
-    const staffId = crypto.randomUUID();
+    staffId = crypto.randomUUID();
     const hashedPin = hashPassword("1234"); // Default PIN, should be changed by user
     await query(
       'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
@@ -741,6 +742,51 @@ app.post("/api/staff/verify-pin", authMiddleware, async (req, res) => {
 
   if (!bcrypt.compareSync(pin, staff.pin))
     return res.status(401).json({ error: "Invalid PIN" });
+  res.json({ success: true });
+});
+
+// Update staff
+app.put("/api/staff/:id", authMiddleware, async (req, res) => {
+  const { userName, role, contactNumber, pin } = req.body;
+  const now = new Date().toISOString();
+
+  const fields = [];
+  const values = [];
+  let index = 1;
+
+  if (userName !== undefined) {
+    fields.push(`"userName" = $${index++}`);
+    values.push(userName);
+  }
+
+  if (role !== undefined) {
+    fields.push(`role = $${index++}`);
+    values.push(role);
+  }
+
+  if (contactNumber !== undefined) {
+    fields.push(`"contactNumber" = $${index++}`);
+    values.push(contactNumber);
+  }
+
+  if (pin !== undefined) {
+    fields.push(`pin = $${index++}`);
+    values.push(pin);
+  }
+
+  fields.push(`"updatedAt" = $${index++}`);
+  values.push(now);
+
+  values.push(req.params.id);
+
+  const sql = `
+    UPDATE staff
+    SET ${fields.join(", ")}
+    WHERE id = $${index}
+  `;
+
+  const result = await query(sql, values);
+
   res.json({ success: true });
 });
 
