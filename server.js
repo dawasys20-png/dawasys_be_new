@@ -6,25 +6,34 @@ const crypto = require("crypto");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const morgan = require("morgan");
 
 const { runMigrations } = require("./migrations");
 
 // PostgreSQL connection pool
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
 });
 
 // Test connection and run migrations
-pool.connect((err, client, release) => {
-  if (err) {
+(async () => {
+  let client;
+  try {
+    client = await pool.connect();
+    console.log("Connected to PostgreSQL");
+    await runMigrations(client);
+    console.log("Migrations completed");
+  } catch (err) {
     console.error("Failed to connect to PostgreSQL", err.stack);
     process.exit(1);
+  } finally {
+    if (client) client.release();
   }
-  console.log("Connected to PostgreSQL");
-  runMigrations(client);
-  release();
-});
+})();
 
 // --------------------------
 // Helper functions
@@ -44,17 +53,22 @@ async function query(text, params) {
 async function getMedicines(pharmacyId) {
   if (pharmacyId) {
     const result = await query(
-      "SELECT * FROM medicines WHERE isDeleted = 0 AND pharmacyId = $1 ORDER BY name",
+      'SELECT * FROM medicines WHERE "isDeleted" = 0 AND "pharmacyId" = $1 ORDER BY name',
       [pharmacyId],
     );
     return result.rows;
   }
-  const result = await query("SELECT * FROM medicines WHERE isDeleted = 0 ORDER BY name");
+  const result = await query(
+    'SELECT * FROM medicines WHERE "isDeleted" = 0 ORDER BY name',
+  );
   return result.rows;
 }
 
 async function getMedicineById(id) {
-  const result = await query("SELECT * FROM medicines WHERE id = $1 AND isDeleted = 0", [id]);
+  const result = await query(
+    'SELECT * FROM medicines WHERE id = $1 AND "isDeleted" = 0',
+    [id],
+  );
   return result.rows[0] || null;
 }
 
@@ -62,22 +76,45 @@ async function addMedicine(m) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
+  // Validate required expiryDate
+  if (!m.expiryDate || m.expiryDate.trim() === "") {
+    throw new Error("expiryDate is required");
+  }
+
   await query(
     `
     INSERT INTO medicines (
-      id, name, unitType, quantity, boxes, stripsPerBox, unitsPerStrip,
-      bottles, mlPerBottle, price, lowStockThreshold, restockThreshold,
-      expiryDate, supplier, batchNumber, unitBuyingPrice, isDeleted,
-      wholesaleStripPrice, wholesaleBoxPrice, createdAt, updatedAt,
-      buyingPrice, sellingPrice, pharmacyId
+      id, name, "unitType", quantity, boxes, "stripsPerBox", "unitsPerStrip",
+      bottles, "mlPerBottle", price, "lowStockThreshold", "restockThreshold",
+      "expiryDate", supplier, "batchNumber", "unitBuyingPrice", "isDeleted",
+      "wholesaleStripPrice", "wholesaleBoxPrice", "createdAt", "updatedAt",
+      "buyingPrice", "sellingPrice", "pharmacyId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
   `,
     [
-      id, m.name, m.unitType, m.quantity, m.boxes || null, m.stripsPerBox || null,
-      m.unitsPerStrip || null, m.bottles || null, m.mlPerBottle || null, m.price,
-      m.lowStockThreshold, m.restockThreshold, m.expiryDate, m.supplier || null,
-      m.batchNumber || null, m.unitBuyingPrice || 0, 0, m.wholesaleStripPrice || 0,
-      m.wholesaleBoxPrice || 0, now, now, m.buyingPrice || 0, m.sellingPrice || 0,
+      id,
+      m.name,
+      m.unitType,
+      m.quantity,
+      m.boxes || null,
+      m.stripsPerBox || null,
+      m.unitsPerStrip || null,
+      m.bottles || null,
+      m.mlPerBottle || null,
+      m.price,
+      m.lowStockThreshold,
+      m.restockThreshold,
+      m.expiryDate,
+      m.supplier || null,
+      m.batchNumber || null,
+      m.unitBuyingPrice || 0,
+      0,
+      m.wholesaleStripPrice || 0,
+      m.wholesaleBoxPrice || 0,
+      now,
+      now,
+      m.buyingPrice || 0,
+      m.sellingPrice || 0,
       m.pharmacyId || null,
     ],
   );
@@ -90,27 +127,50 @@ async function updateMedicine(id, updates) {
   const medicine = await getMedicineById(id);
   if (!medicine) throw new Error("Medicine not found");
 
+  // Prevent updating expiryDate to empty string
+  if (
+    updates.expiryDate !== undefined &&
+    (!updates.expiryDate || updates.expiryDate.trim() === "")
+  ) {
+    throw new Error("expiryDate cannot be empty");
+  }
+
   const updated = { ...medicine, ...updates, updatedAt: now };
 
   await query(
     `
     UPDATE medicines SET
-      name=$1, unitType=$2, quantity=$3, boxes=$4, stripsPerBox=$5,
-      unitsPerStrip=$6, bottles=$7, mlPerBottle=$8, price=$9,
-      lowStockThreshold=$10, restockThreshold=$11, expiryDate=$12,
-      supplier=$13, batchNumber=$14, unitBuyingPrice=$15,
-      wholesaleStripPrice=$16, wholesaleBoxPrice=$17, updatedAt=$18,
-      buyingPrice=$19, sellingPrice=$20, pharmacyId=$21
+      name=$1, "unitType"=$2, quantity=$3, boxes=$4, "stripsPerBox"=$5,
+      "unitsPerStrip"=$6, bottles=$7, "mlPerBottle"=$8, price=$9,
+      "lowStockThreshold"=$10, "restockThreshold"=$11, "expiryDate"=$12,
+      supplier=$13, "batchNumber"=$14, "unitBuyingPrice"=$15,
+      "wholesaleStripPrice"=$16, "wholesaleBoxPrice"=$17, "updatedAt"=$18,
+      "buyingPrice"=$19, "sellingPrice"=$20, "pharmacyId"=$21
     WHERE id=$22
   `,
     [
-      updated.name, updated.unitType, updated.quantity, updated.boxes || null,
-      updated.stripsPerBox || null, updated.unitsPerStrip || null, updated.bottles || null,
-      updated.mlPerBottle || null, updated.price, updated.lowStockThreshold,
-      updated.restockThreshold, updated.expiryDate, updated.supplier || null,
-      updated.batchNumber || null, updated.unitBuyingPrice || 0,
-      updated.wholesaleStripPrice || 0, updated.wholesaleBoxPrice || 0, now,
-      updated.buyingPrice || 0, updated.sellingPrice || 0, updated.pharmacyId || null, id,
+      updated.name,
+      updated.unitType,
+      updated.quantity,
+      updated.boxes || null,
+      updated.stripsPerBox || null,
+      updated.unitsPerStrip || null,
+      updated.bottles || null,
+      updated.mlPerBottle || null,
+      updated.price,
+      updated.lowStockThreshold,
+      updated.restockThreshold,
+      updated.expiryDate,
+      updated.supplier || null,
+      updated.batchNumber || null,
+      updated.unitBuyingPrice || 0,
+      updated.wholesaleStripPrice || 0,
+      updated.wholesaleBoxPrice || 0,
+      now,
+      updated.buyingPrice || 0,
+      updated.sellingPrice || 0,
+      updated.pharmacyId || null,
+      id,
     ],
   );
 
@@ -118,7 +178,7 @@ async function updateMedicine(id, updates) {
 }
 
 async function deleteMedicine(id) {
-  await query("UPDATE medicines SET isDeleted=1 WHERE id=$1", [id]);
+  await query('UPDATE medicines SET "isDeleted"=1 WHERE id=$1', [id]);
 }
 
 // Transactions
@@ -143,21 +203,29 @@ async function addTransaction(tx) {
   await query(
     `
     INSERT INTO transactions (
-      id, totalAmount, paymentMethod, date, notes, createdAt,
-      profit, transactionType, packType, pharmacyId, cashierId
+      id, "totalAmount", "paymentMethod", date, notes, "createdAt",
+      profit, "transactionType", "packType", "pharmacyId", "cashierId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `,
     [
-      id, tx.totalAmount, tx.paymentMethod, tx.date, tx.notes || null,
-      now, tx.profit, tx.transactionType, tx.packType || null,
-      tx.pharmacyId || null, tx.cashierId || null,
+      id,
+      tx.totalAmount,
+      tx.paymentMethod,
+      tx.date,
+      tx.notes || null,
+      now,
+      tx.profit,
+      tx.transactionType,
+      tx.packType || null,
+      tx.pharmacyId || null,
+      tx.cashierId || null,
     ],
   );
 
   const itemStmt = `
-    INSERT INTO transactionItems (
-      id, transactionId, medicineId, medicineName, unitType, quantity,
-      dosageInstructions, unitPrice, subtotal, stockQuantity, pharmacyId
+    INSERT INTO "transactionItems" (
+      id, "transactionId", "medicineId", "medicineName", "unitType", quantity,
+      "dosageInstructions", "unitPrice", "subtotal", "stockQuantity", "pharmacyId"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `;
 
@@ -168,16 +236,24 @@ async function addTransaction(tx) {
     for (const item of tx.items) {
       const itemId = crypto.randomUUID();
       await client.query(itemStmt, [
-        itemId, id, item.medicineId, item.medicineName, item.unitType,
-        item.quantity, item.dosageInstructions || null, item.unitPrice,
-        item.subtotal, item.stockQuantity, tx.pharmacyId || null,
+        itemId,
+        id,
+        item.medicineId,
+        item.medicineName,
+        item.unitType,
+        item.quantity,
+        item.dosageInstructions || null,
+        item.unitPrice,
+        item.subtotal,
+        item.stockQuantity,
+        tx.pharmacyId || null,
       ]);
 
       // Reduce medicine stock
       const medicine = await getMedicineById(item.medicineId);
       if (medicine) {
         await query(
-          "UPDATE medicines SET quantity = quantity - $1, updatedAt = $2 WHERE id = $3",
+          'UPDATE medicines SET quantity = quantity - $1, "updatedAt" = $2 WHERE id = $3',
           [item.stockQuantity, now, item.medicineId],
         );
       }
@@ -207,7 +283,7 @@ async function getTransactions(pharmacyId) {
   let transactions;
   if (pharmacyId) {
     const result = await query(
-      "SELECT * FROM transactions WHERE pharmacyId = $1 ORDER BY date ASC",
+      'SELECT * FROM transactions WHERE "pharmacyId" = $1 ORDER BY date ASC',
       [pharmacyId],
     );
     transactions = result.rows;
@@ -218,14 +294,20 @@ async function getTransactions(pharmacyId) {
 
   // Fetch items for each transaction
   for (const tx of transactions) {
-    const itemsResult = await query("SELECT * FROM transactionItems WHERE transactionId = $1", [tx.id]);
+    const itemsResult = await query(
+      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
+      [tx.id],
+    );
     tx.items = itemsResult.rows;
   }
   return transactions;
 }
 
 async function deleteTransaction(id) {
-  const itemsResult = await query("SELECT * FROM transactionItems WHERE transactionId = $1", [id]);
+  const itemsResult = await query(
+    'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
+    [id],
+  );
   const items = itemsResult.rows;
 
   const client = await pool.connect();
@@ -234,7 +316,7 @@ async function deleteTransaction(id) {
     for (const item of items) {
       // Restock the medicine
       await query(
-        "UPDATE medicines SET quantity = quantity + $1, updatedAt = $2 WHERE id = $3",
+        'UPDATE medicines SET quantity = quantity + $1, "updatedAt" = $2 WHERE id = $3',
         [item.stockQuantity, new Date().toISOString(), item.medicineId],
       );
 
@@ -258,6 +340,24 @@ async function deleteTransaction(id) {
   }
 }
 
+async function getTransactionsByCashierId(cashierId) {
+  const result = await query(
+    'SELECT * FROM transactions WHERE "cashierId" = $1 ORDER BY date ASC',
+    [cashierId],
+  );
+  const transactions = result.rows;
+
+  // Fetch items for each transaction
+  for (const tx of transactions) {
+    const itemsResult = await query(
+      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
+      [tx.id],
+    );
+    tx.items = itemsResult.rows;
+  }
+  return transactions;
+}
+
 // Licenses
 async function saveLicense(license) {
   const id = crypto.randomUUID();
@@ -266,14 +366,22 @@ async function saveLicense(license) {
   await query(
     `
     INSERT INTO licenses (
-      id, key, type, licenseType, status, activationDate,
-      expiryDate, maxMachines, machineIds, signature, createdAt
+      id, key, type, "licenseType", status, "activationDate",
+      "expiryDate", "maxMachines", "machineIds", signature, "createdAt"
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
   `,
     [
-      id, license.key, license.type, license.licenseType, license.status,
-      license.activationDate, license.expiryDate || null, license.maxMachines,
-      license.machineIds, license.signature || null, now,
+      id,
+      license.key,
+      license.type,
+      license.licenseType,
+      license.status,
+      license.activationDate,
+      license.expiryDate || null,
+      license.maxMachines,
+      license.machineIds,
+      license.signature || null,
+      now,
     ],
   );
 
@@ -281,7 +389,9 @@ async function saveLicense(license) {
 }
 
 async function getLicense() {
-  const result = await query("SELECT * FROM licenses ORDER BY createdAt DESC LIMIT 1");
+  const result = await query(
+    'SELECT * FROM licenses ORDER BY "createdAt" DESC LIMIT 1',
+  );
   return result.rows[0] || null;
 }
 
@@ -289,19 +399,23 @@ async function getLicense() {
 async function saveSetting(key, value) {
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO settings (key, value, updatedAt) VALUES ($1, $2, $3) " +
-    "ON CONFLICT (key) DO UPDATE SET value = $2, updatedAt = $3",
+    'INSERT INTO settings (key, value, "updatedAt") VALUES ($1, $2, $3) ' +
+      'ON CONFLICT (key) DO UPDATE SET value = $2, "updatedAt" = $3',
     [key, value, now],
   );
 }
 
 async function getSetting(key) {
-  const result = await query("SELECT value FROM settings WHERE key = $1", [key]);
+  const result = await query("SELECT value FROM settings WHERE key = $1", [
+    key,
+  ]);
   return result.rows[0]?.value || null;
 }
 
 async function getInventoryMovements() {
-  const result = await query("SELECT * FROM inventory_movements ORDER BY date DESC");
+  const result = await query(
+    'SELECT * FROM "inventory_movements" ORDER BY date DESC',
+  );
   return result.rows;
 }
 
@@ -309,9 +423,16 @@ async function addInventoryMovementRaw(client, movement) {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await client.query(
-    "INSERT INTO inventory_movements (id, medicineId, quantity, unitType, movementType, createdAt) " +
-    "VALUES ($1, $2, $3, $4, $5, $6)",
-    [id, movement.medicineId, movement.quantity, movement.unitType, movement.movementType, now],
+    'INSERT INTO "inventory_movements" (id, "medicineId", quantity, "unitType", "movementType", "createdAt") ' +
+      "VALUES ($1, $2, $3, $4, $5, $6)",
+    [
+      id,
+      movement.medicineId,
+      movement.quantity,
+      movement.unitType,
+      movement.movementType,
+      now,
+    ],
   );
   return { ...movement, id, createdAt: now };
 }
@@ -321,12 +442,12 @@ async function addInventoryMovement(movement) {
 }
 
 async function deleteInventoryMovement(id) {
-  await query("DELETE FROM inventory_movements WHERE id = $1", [id]);
+  await query('DELETE FROM "inventory_movements" WHERE id = $1', [id]);
 }
 
 async function getInventoryMovementsByMedicineId(medicineId) {
   const result = await query(
-    "SELECT * FROM inventory_movements WHERE medicineId = $1 ORDER BY date DESC",
+    'SELECT * FROM "inventory_movements" WHERE "medicineId" = $1 ORDER BY date DESC',
     [medicineId],
   );
   return result.rows;
@@ -340,7 +461,9 @@ function hashPassword(password) {
 }
 
 async function getUserByUsername(username) {
-  const result = await query("SELECT * FROM users WHERE username = $1", [username]);
+  const result = await query("SELECT * FROM users WHERE username = $1", [
+    username,
+  ]);
   return result.rows[0] || null;
 }
 
@@ -363,6 +486,8 @@ function authMiddleware(req, res, next) {
 // Express API
 // --------------------------
 const app = express();
+
+app.use(morgan("tiny"));
 app.use(express.json());
 app.use(cors());
 
@@ -377,7 +502,9 @@ app.post("/api/login", async (req, res) => {
   if (!bcrypt.compareSync(password, user.password))
     return res.status(401).json({ error: "Invalid credentials" });
 
-  const token = jwt.sign(user, process.env.JWT_SECRET || "secret", { expiresIn: "1h" });
+  const token = jwt.sign(user, process.env.JWT_SECRET || "secret", {
+    expiresIn: "8h",
+  });
   res.json({ token, user });
 });
 
@@ -388,9 +515,10 @@ app.post("/api/register", async (req, res) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO users (id, username, password, phone, createdAt, updatedAt) VALUES ($1, $2, $3, $4, $5, $6)",
+    'INSERT INTO users (id, username, password, phone, "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6)',
     [id, username, hashPassword(password), phone, now, now],
   );
+
   res.json({ id, username, phone, createdAt: now, updatedAt: now });
 });
 
@@ -400,14 +528,14 @@ app.post("/api/pharmacy", authMiddleware, async (req, res) => {
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
-    "INSERT INTO pharmacyInfo (id, name, address, contactNumber, createdAt, userId) VALUES ($1, $2, $3, $4, $5, $6)",
+    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", "createdAt", "userId") VALUES ($1, $2, $3, $4, $5, $6)',
     [id, name, address, contactNumber, now, req.user.id],
   );
   res.json({ id, name, address, contactNumber, createdAt: now });
 });
 
 // Medicines
-app.get("/api/medicines", (req, res) =>
+app.get("/api/medicines", async (req, res) =>
   res.json(await getMedicines(req.query.pharmacyId || null)),
 );
 app.get("/api/medicines/:id", async (req, res) => {
@@ -415,7 +543,9 @@ app.get("/api/medicines/:id", async (req, res) => {
   if (!medicine) return res.status(404).json({ error: "Not found" });
   res.json(medicine);
 });
-app.post("/api/medicines", async (req, res) => res.json(await addMedicine(req.body)));
+app.post("/api/medicines", async (req, res) =>
+  res.json(await addMedicine(req.body)),
+);
 app.put("/api/medicines/:id", async (req, res) => {
   try {
     res.json(await updateMedicine(req.params.id, req.body));
@@ -429,18 +559,29 @@ app.delete("/api/medicines/:id", async (req, res) => {
 });
 
 // Transactions
-app.get("/api/transactions", (req, res) =>
+app.get("/api/transactions", async (req, res) =>
   res.json(await getTransactions(req.query.pharmacyId || null)),
 );
-app.post("/api/transactions", async (req, res) => res.json(await addTransaction(req.body)));
+app.post("/api/transactions", async (req, res) =>
+  res.json(await addTransaction(req.body)),
+);
 app.delete("/api/transactions/:id", async (req, res) => {
   await deleteTransaction(req.params.id);
   res.json({ success: true });
 });
 
+// cashier transactions
+app.get("/api/transactions/cashier/:cashierId", async (req, res) =>
+  res.json(await getTransactionsByCashierId(req.params.cashierId)),
+);
+
 // Licenses
-app.get("/api/license", async (req, res) => res.json(await getLicense() || null));
-app.post("/api/license", async (req, res) => res.json(await saveLicense(req.body)));
+app.get("/api/license", async (req, res) =>
+  res.json((await getLicense()) || null),
+);
+app.post("/api/license", async (req, res) =>
+  res.json(await saveLicense(req.body)),
+);
 
 // Settings
 app.get("/api/settings/:key", async (req, res) =>
@@ -472,57 +613,111 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
   const userId = req.user.id;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
+
   await query(
-    "INSERT INTO pharmacyInfo (id, name, address, contactNumber, phone, email, userId, createdAt, updatedAt) " +
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt") ' +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
     [id, name, address, contactNumber, phone, email, userId, now, now],
   );
+
+  // Check if first pharmacy for user, create admin staff
+  const result = await query(
+    'SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1',
+    [userId],
+  );
+  const pharmacyCount = parseInt(result.rows[0].count, 10);
+  let staffId;
+  if (pharmacyCount === 1) {
+    staffId = crypto.randomUUID();
+    const hashedPin = hashPassword("1234"); // Default PIN, should be changed by user
+    await query(
+      'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      [
+        staffId,
+        req.user.username,
+        "admin",
+        contactNumber || null,
+        hashedPin,
+        id,
+        now,
+        now,
+      ],
+    );
+  }
+
   res.json({
-    id, name, address, contactNumber, phone, email, createdAt: now, updatedAt: now,
+    data: {
+      id,
+      name,
+      address,
+      contactNumber,
+      phone,
+      email,
+      createdAt: now,
+      updatedAt: now,
+    },
+    staffId: pharmacyCount === 1 ? staffId : null,
   });
 });
 
 // Get pharmacy by user ID
 app.get("/api/pharmacy", authMiddleware, async (req, res) => {
   const result = await query(
-    "SELECT * FROM pharmacyInfo WHERE userId = $1 ORDER BY createdAt DESC",
+    'SELECT * FROM "pharmacyInfo" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
     [req.user.id],
   );
   const pharmacy = result.rows[0];
   if (!pharmacy) return res.status(404).json({ error: "Not found" });
+
   res.json(pharmacy);
 });
 
 // Get all pharmacies
 app.get("/api/pharmacies", async (req, res) => {
-  const result = await query("SELECT * FROM pharmacyInfo");
+  const result = await query('SELECT * FROM "pharmacyInfo"');
+
   res.json(result.rows);
 });
 
 // Staff registration
 app.post("/api/staff", authMiddleware, async (req, res) => {
   const { userName, role, contactNumber, pin, pharmacyId } = req.body;
+
+  // Validate required pharmacyId
+  if (!pharmacyId || pharmacyId.trim() === "") {
+    return res.status(400).json({ error: "pharmacyId is required" });
+  }
+
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const hashedPin = hashPassword(pin);
   await query(
-    "INSERT INTO staff (id, userName, role, contactNumber, pin, pharmacyId, createdAt, updatedAt) " +
-    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     [id, userName, role, contactNumber, hashedPin, pharmacyId, now, now],
   );
   res.json({
-    id, userName, role, contactNumber, pin: hashedPin, pharmacyId, createdAt: now, updatedAt: now,
+    id,
+    userName,
+    role,
+    contactNumber,
+    pin: hashedPin,
+    pharmacyId,
+    createdAt: now,
+    updatedAt: now,
   });
 });
 
 // Get staff by pharmacy ID
 app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
   const result = await query(
-    "SELECT * FROM staff WHERE pharmacyId = $1 ORDER BY createdAt DESC",
+    'SELECT * FROM staff WHERE "pharmacyId" = $1 ORDER BY "createdAt" DESC',
     [req.params.pharmacyId],
   );
   const staff = result.rows;
-  if (!staff || staff.length === 0) return res.status(404).json({ error: "Not found" });
+  if (!staff || staff.length === 0)
+    return res.status(404).json({ error: "Not found" });
   res.json(staff);
 });
 
@@ -550,9 +745,56 @@ app.post("/api/staff/verify-pin", authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+// Update staff
+app.put("/api/staff/:id", authMiddleware, async (req, res) => {
+  const { userName, role, contactNumber, pin } = req.body;
+  const now = new Date().toISOString();
+
+  const fields = [];
+  const values = [];
+  let index = 1;
+
+  if (userName !== undefined) {
+    fields.push(`"userName" = $${index++}`);
+    values.push(userName);
+  }
+
+  if (role !== undefined) {
+    fields.push(`role = $${index++}`);
+    values.push(role);
+  }
+
+  if (contactNumber !== undefined) {
+    fields.push(`"contactNumber" = $${index++}`);
+    values.push(contactNumber);
+  }
+
+  if (pin !== undefined) {
+    fields.push(`pin = $${index++}`);
+    values.push(pin);
+  }
+
+  fields.push(`"updatedAt" = $${index++}`);
+  values.push(now);
+
+  values.push(req.params.id);
+
+  const sql = `
+    UPDATE staff
+    SET ${fields.join(", ")}
+    WHERE id = $${index}
+  `;
+
+  const result = await query(sql, values);
+
+  res.json({ success: true });
+});
+
 // Delete staff
 app.delete("/api/staff/:id", authMiddleware, async (req, res) => {
-  const result = await query("DELETE FROM staff WHERE id = $1 RETURNING *", [req.params.id]);
+  const result = await query("DELETE FROM staff WHERE id = $1 RETURNING *", [
+    req.params.id,
+  ]);
   if (result.rows.length === 0) {
     return res.status(404).json({ error: "Staff not found" });
   }
