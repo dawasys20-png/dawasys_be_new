@@ -7,8 +7,40 @@ const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const morgan = require("morgan");
-
 const { runMigrations } = require("./migrations");
+const rateLimit = require("express-rate-limit");
+const requireApiKey = require("./middleware/revokeMw");
+const {
+  sendResetPasswordEmail,
+  sendVerificationEmail,
+} = require("./middleware/email");
+const fs = require("fs");
+const authMiddleware = require("./middleware/auth");
+const {
+  query,
+  getMedicines,
+  getMedicineById,
+  addMedicine,
+  updateMedicine,
+  deleteMedicine,
+  addTransaction,
+  getTransactionsByCashierId,
+  saveLicense,
+  getLicense,
+  saveSetting,
+  getSetting,
+  addInventoryMovement,
+  deleteInventoryMovement,
+  getInventoryMovementsByMedicineId,
+  getInventoryMovements,
+  getUserByUsername,
+} = require("./lib/dbFunc");
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { error: "Too many requests" },
+});
 
 // PostgreSQL connection pool
 const pool = new Pool({
@@ -35,423 +67,69 @@ const pool = new Pool({
   }
 })();
 
+// ===================== CONFIG =====================
+let PRIVATE_KEY;
+let PHARMA_PRIVATE_KEY;
+let DENT_PRIVATE_KEY;
+
+try {
+  PRIVATE_KEY = fs.readFileSync("./private.pem", "utf8");
+} catch (err) {
+  console.log("Generated new private key");
+}
+
+try {
+  PHARMA_PRIVATE_KEY = fs.readFileSync("./pem/pharma.pem", "utf8");
+} catch (err) {
+  console.log("Pharma private key not found");
+}
+
+try {
+  DENT_PRIVATE_KEY = fs.readFileSync("./pem/dent.pem", "utf8");
+} catch (err) {
+  console.log("Dent private key not found");
+}
+
 // --------------------------
 // Helper functions
 // --------------------------
 
-async function query(text, params) {
-  const client = await pool.connect();
-  try {
-    const result = await client.query(text, params);
-    return result;
-  } finally {
-    client.release();
+function getPrivateKey(productCode) {
+  if (productCode?.toUpperCase().startsWith("PHARMA")) {
+    return PHARMA_PRIVATE_KEY || PRIVATE_KEY;
   }
-}
-
-// Medicines
-async function getMedicines(pharmacyId) {
-  if (pharmacyId) {
-    const result = await query(
-      'SELECT * FROM medicines WHERE "isDeleted" = 0 AND "pharmacyId" = $1 ORDER BY name',
-      [pharmacyId],
-    );
-    return result.rows;
+  if (productCode?.toUpperCase().startsWith("DENT")) {
+    return DENT_PRIVATE_KEY || PRIVATE_KEY;
   }
-  const result = await query(
-    'SELECT * FROM medicines WHERE "isDeleted" = 0 ORDER BY name',
-  );
-  return result.rows;
+  return PRIVATE_KEY;
 }
 
-async function getMedicineById(id) {
-  const result = await query(
-    'SELECT * FROM medicines WHERE id = $1 AND "isDeleted" = 0',
-    [id],
-  );
-  return result.rows[0] || null;
+function generateLicenseKey(productCode = "DWF") {
+  const timestamp = Date.now().toString(36).toUpperCase();
+  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+  return {
+    key: `${productCode}-${timestamp}-${random}`,
+    productCode: productCode,
+  };
 }
 
-async function addMedicine(m) {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
+function canonicalStringify(obj) {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
 
-  // Validate required expiryDate
-  if (!m.expiryDate || m.expiryDate.trim() === "") {
-    throw new Error("expiryDate is required");
+function signLicense(payload, productCode = "DWF") {
+  const data = canonicalStringify(payload);
+  const privateKey = getPrivateKey(productCode);
+  if (!privateKey) {
+    throw new Error("Private key not available for signing");
   }
-
-  await query(
-    `
-    INSERT INTO medicines (
-      id, name, "unitType", quantity, boxes, "stripsPerBox", "unitsPerStrip",
-      bottles, "mlPerBottle", price, "lowStockThreshold", "restockThreshold",
-      "expiryDate", supplier, "batchNumber", "unitBuyingPrice", "isDeleted",
-      "wholesaleStripPrice", "wholesaleBoxPrice", "createdAt", "updatedAt",
-      "buyingPrice", "sellingPrice", "pharmacyId"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
-  `,
-    [
-      id,
-      m.name,
-      m.unitType,
-      m.quantity,
-      m.boxes || null,
-      m.stripsPerBox || null,
-      m.unitsPerStrip || null,
-      m.bottles || null,
-      m.mlPerBottle || null,
-      m.price,
-      m.lowStockThreshold,
-      m.restockThreshold,
-      m.expiryDate,
-      m.supplier || null,
-      m.batchNumber || null,
-      m.unitBuyingPrice || 0,
-      0,
-      m.wholesaleStripPrice || 0,
-      m.wholesaleBoxPrice || 0,
-      now,
-      now,
-      m.buyingPrice || 0,
-      m.sellingPrice || 0,
-      m.pharmacyId || null,
-    ],
-  );
-
-  return { ...m, id, createdAt: now, updatedAt: now };
+  const privateKeyObject = crypto.createPrivateKey(privateKey);
+  const signature = crypto.sign(null, Buffer.from(data), privateKeyObject);
+  return signature.toString("base64");
 }
 
-async function updateMedicine(id, updates) {
-  const now = new Date().toISOString();
-  const medicine = await getMedicineById(id);
-  if (!medicine) throw new Error("Medicine not found");
-
-  // Prevent updating expiryDate to empty string
-  if (
-    updates.expiryDate !== undefined &&
-    (!updates.expiryDate || updates.expiryDate.trim() === "")
-  ) {
-    throw new Error("expiryDate cannot be empty");
-  }
-
-  const updated = { ...medicine, ...updates, updatedAt: now };
-
-  await query(
-    `
-    UPDATE medicines SET
-      name=$1, "unitType"=$2, quantity=$3, boxes=$4, "stripsPerBox"=$5,
-      "unitsPerStrip"=$6, bottles=$7, "mlPerBottle"=$8, price=$9,
-      "lowStockThreshold"=$10, "restockThreshold"=$11, "expiryDate"=$12,
-      supplier=$13, "batchNumber"=$14, "unitBuyingPrice"=$15,
-      "wholesaleStripPrice"=$16, "wholesaleBoxPrice"=$17, "updatedAt"=$18,
-      "buyingPrice"=$19, "sellingPrice"=$20, "pharmacyId"=$21
-    WHERE id=$22
-  `,
-    [
-      updated.name,
-      updated.unitType,
-      updated.quantity,
-      updated.boxes || null,
-      updated.stripsPerBox || null,
-      updated.unitsPerStrip || null,
-      updated.bottles || null,
-      updated.mlPerBottle || null,
-      updated.price,
-      updated.lowStockThreshold,
-      updated.restockThreshold,
-      updated.expiryDate,
-      updated.supplier || null,
-      updated.batchNumber || null,
-      updated.unitBuyingPrice || 0,
-      updated.wholesaleStripPrice || 0,
-      updated.wholesaleBoxPrice || 0,
-      now,
-      updated.buyingPrice || 0,
-      updated.sellingPrice || 0,
-      updated.pharmacyId || null,
-      id,
-    ],
-  );
-
-  return updated;
-}
-
-async function deleteMedicine(id) {
-  await query('UPDATE medicines SET "isDeleted"=1 WHERE id=$1', [id]);
-}
-
-// Transactions
-async function addTransaction(tx) {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-
-  // Check if all medicines have sufficient quantity before processing
-  for (const item of tx.items) {
-    const medicine = await getMedicineById(item.medicineId);
-    if (!medicine) {
-      throw new Error(`Medicine not found: ${item.medicineName}`);
-    }
-    if (medicine.quantity < item.stockQuantity) {
-      throw new Error(
-        `Insufficient quantity for ${item.medicineName}. Available: ${medicine.quantity}, Requested: ${item.stockQuantity}`,
-      );
-    }
-  }
-
-  // Insert transaction
-  await query(
-    `
-    INSERT INTO transactions (
-      id, "totalAmount", "paymentMethod", date, notes, "createdAt",
-      profit, "transactionType", "packType", "pharmacyId", "cashierId", "billTotal"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-  `,
-    [
-      id,
-      tx.totalAmount,
-      tx.paymentMethod,
-      tx.date,
-      tx.notes || null,
-      now,
-      tx.profit,
-      tx.transactionType,
-      tx.packType || null,
-      tx.pharmacyId || null,
-      tx.cashierId || null,
-      tx.billTotal || null,
-    ],
-  );
-
-  const itemStmt = `
-    INSERT INTO "transactionItems" (
-      id, "transactionId", "medicineId", "medicineName", "unitType", quantity,
-      "dosageInstructions", "unitPrice", "subtotal", "stockQuantity", "pharmacyId"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  `;
-
-  // Insert items and update stock in a transaction
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    for (const item of tx.items) {
-      const itemId = crypto.randomUUID();
-      await client.query(itemStmt, [
-        itemId,
-        id,
-        item.medicineId,
-        item.medicineName,
-        item.unitType,
-        item.quantity,
-        item.dosageInstructions || null,
-        item.unitPrice,
-        item.subtotal,
-        item.stockQuantity,
-        tx.pharmacyId || null,
-      ]);
-
-      // Reduce medicine stock
-      const medicine = await getMedicineById(item.medicineId);
-      if (medicine) {
-        await query(
-          'UPDATE medicines SET quantity = quantity - $1, "updatedAt" = $2 WHERE id = $3',
-          [item.stockQuantity, now, item.medicineId],
-        );
-      }
-
-      // Add inventory movement
-      await addInventoryMovementRaw(client, {
-        medicineId: item.medicineId,
-        quantity: -item.stockQuantity,
-        transactionId: id,
-        transactionType: "create",
-        unitType: item.unitType,
-        movementType: "sale",
-      });
-    }
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  return { ...tx, id, createdAt: now };
-}
-
-async function getTransactions(pharmacyId) {
-  let transactions;
-  if (pharmacyId) {
-    const result = await query(
-      'SELECT * FROM transactions WHERE "pharmacyId" = $1 ORDER BY date ASC',
-      [pharmacyId],
-    );
-    transactions = result.rows;
-  } else {
-    const result = await query("SELECT * FROM transactions ORDER BY date ASC");
-    transactions = result.rows;
-  }
-
-  // Fetch items for each transaction
-  for (const tx of transactions) {
-    const itemsResult = await query(
-      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
-      [tx.id],
-    );
-    tx.items = itemsResult.rows;
-  }
-  return transactions;
-}
-
-async function deleteTransaction(id) {
-  const itemsResult = await query(
-    'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
-    [id],
-  );
-  const items = itemsResult.rows;
-
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    for (const item of items) {
-      // Restock the medicine
-      await query(
-        'UPDATE medicines SET quantity = quantity + $1, "updatedAt" = $2 WHERE id = $3',
-        [item.stockQuantity, new Date().toISOString(), item.medicineId],
-      );
-
-      // Add inventory movement
-      await addInventoryMovementRaw(client, {
-        medicineId: item.medicineId,
-        quantity: item.stockQuantity,
-        transactionId: id,
-        transactionType: "delete",
-        unitType: item.unitType,
-        movementType: "restock",
-      });
-    }
-    await client.query("DELETE FROM transactions WHERE id = $1", [id]);
-    await client.query("COMMIT");
-  } catch (err) {
-    await client.query("ROLLBACK");
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-async function getTransactionsByCashierId(cashierId) {
-  const result = await query(
-    'SELECT * FROM transactions WHERE "cashierId" = $1 ORDER BY date ASC',
-    [cashierId],
-  );
-  const transactions = result.rows;
-
-  // Fetch items for each transaction
-  for (const tx of transactions) {
-    const itemsResult = await query(
-      'SELECT * FROM "transactionItems" WHERE "transactionId" = $1',
-      [tx.id],
-    );
-    tx.items = itemsResult.rows;
-  }
-  return transactions;
-}
-
-// Licenses
-async function saveLicense(license) {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-
-  await query(
-    `
-    INSERT INTO licenses (
-      id, key, type, "licenseType", status, "activationDate",
-      "expiryDate", "maxMachines", "machineIds", signature, "createdAt"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  `,
-    [
-      id,
-      license.key,
-      license.type,
-      license.licenseType,
-      license.status,
-      license.activationDate,
-      license.expiryDate || null,
-      license.maxMachines,
-      license.machineIds,
-      license.signature || null,
-      now,
-    ],
-  );
-
-  return { ...license, id, createdAt: now };
-}
-
-async function getLicense() {
-  const result = await query(
-    'SELECT * FROM licenses ORDER BY "createdAt" DESC LIMIT 1',
-  );
-  return result.rows[0] || null;
-}
-
-// Settings
-async function saveSetting(key, value) {
-  const now = new Date().toISOString();
-  await query(
-    'INSERT INTO settings (key, value, "updatedAt") VALUES ($1, $2, $3) ' +
-      'ON CONFLICT (key) DO UPDATE SET value = $2, "updatedAt" = $3',
-    [key, value, now],
-  );
-}
-
-async function getSetting(key) {
-  const result = await query("SELECT value FROM settings WHERE key = $1", [
-    key,
-  ]);
-  return result.rows[0]?.value || null;
-}
-
-async function getInventoryMovements() {
-  const result = await query(
-    'SELECT * FROM "inventory_movements" ORDER BY date DESC',
-  );
-  return result.rows;
-}
-
-async function addInventoryMovementRaw(client, movement) {
-  const id = crypto.randomUUID();
-  const now = new Date().toISOString();
-  await client.query(
-    'INSERT INTO "inventory_movements" (id, "medicineId", quantity, "unitType", "movementType", "createdAt") ' +
-      "VALUES ($1, $2, $3, $4, $5, $6)",
-    [
-      id,
-      movement.medicineId,
-      movement.quantity,
-      movement.unitType,
-      movement.movementType,
-      now,
-    ],
-  );
-  return { ...movement, id, createdAt: now };
-}
-
-async function addInventoryMovement(movement) {
-  return await addInventoryMovementRaw(pool, movement);
-}
-
-async function deleteInventoryMovement(id) {
-  await query('DELETE FROM "inventory_movements" WHERE id = $1', [id]);
-}
-
-async function getInventoryMovementsByMedicineId(medicineId) {
-  const result = await query(
-    'SELECT * FROM "inventory_movements" WHERE "medicineId" = $1 ORDER BY date DESC',
-    [medicineId],
-  );
-  return result.rows;
+function generateMarzPar() {
+  return uuid.v4();
 }
 
 // User authentication
@@ -461,33 +139,19 @@ function hashPassword(password) {
   return hash;
 }
 
-async function getUserByUsername(username) {
-  const result = await query("SELECT * FROM users WHERE username = $1", [
-    username,
-  ]);
-  return result.rows[0] || null;
-}
-
-// Auth middleware
-function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "Unauthorized" });
-
-  const token = authHeader.split(" ")[1];
-  if (!token) return res.status(401).json({ error: "Unauthorized" });
-
-  jwt.verify(token, process.env.JWT_SECRET || "secret", (err, user) => {
-    if (err) return res.status(401).json({ error: "Unauthorized" });
-    req.user = user;
-    next();
-  });
-}
+const activateSchema = Joi.object({
+  licenseKey: Joi.string().required(),
+  machineId: Joi.string().required(),
+});
 
 // --------------------------
 // Express API
 // --------------------------
 const app = express();
 
+app.set("trust proxy", 1);
+
+app.use(limiter);
 app.use(morgan("tiny"));
 app.use(express.json());
 app.use(cors());
@@ -593,6 +257,105 @@ app.post("/api/register", async (req, res) => {
   );
 
   res.json({ id, username, phone, createdAt: now, updatedAt: now });
+});
+
+// 2️⃣ VERIFY EMAIL
+app.get("/api/auth/verify", async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).json({ error: "Verification token required" });
+    }
+
+    // Find user with valid verification token
+    const result = await pool.query(
+      `SELECT * FROM users WHERE "verificationToken" = $1`,
+      [token],
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(400).json({ error: "Invalid verification token" });
+    }
+
+    if (user.isverified) {
+      return res.status(400).json({ error: "Account already verified" });
+    }
+
+    if (
+      user.verificationexpires &&
+      new Date(user.verificationexpires) < new Date()
+    ) {
+      return res.status(400).json({ error: "Verification token expired" });
+    }
+
+    // Verify user
+    if (user.verificationtoken !== token) {
+      return res.status(400).json({ error: "Invalid verification token" });
+    }
+
+    await pool.query(
+      `UPDATE users SET "isVerified" = true, "verifiedAt" = now(), "verificationToken" = NULL, "verificationExpires" = NULL
+       WHERE id = $1`,
+      [user.id],
+    );
+
+    res.json({ message: "Email verified successfully. You can now login." });
+  } catch (err) {
+    console.error("Verify error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 3️⃣ RESEND VERIFICATION
+app.post("/api/auth/resend-verification", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    const result = await pool.query(
+      `SELECT id, email, "isVerified" FROM users WHERE email = $1`,
+      [email.toLowerCase()],
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      // Don't reveal if user exists
+      return res.json({
+        message: "If that email exists, a verification link has been sent",
+      });
+    }
+
+    if (user.isverified) {
+      return res.status(400).json({ error: "Account already verified" });
+    }
+
+    // Generate new verification token
+    const verificationToken = crypto.randomBytes(32).toString("hex");
+    const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+    await pool.query(
+      `UPDATE users SET "verificationToken" = $1, "verificationExpires" = $2 WHERE id = $3`,
+      [verificationToken, verificationExpires, user.id],
+    );
+
+    // Send verification email
+    await sendVerificationEmail(email.toLowerCase(), verificationToken);
+
+    res.json({
+      message:
+        "If that email exists and is unverified, a verification link has been sent",
+    });
+  } catch (err) {
+    console.error("Resend verification error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 // Pharmacy registration
@@ -886,8 +649,334 @@ app.delete("/api/staff/:id", authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+// 6️⃣ FORGOT PASSWORD
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Find user by email
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
+      email.toLowerCase(),
+    ]);
+
+    const user = result.rows[0];
+
+    // Always return success to prevent email enumeration
+    if (!user) {
+      return res.json({
+        message: "If that email exists, a password reset link has been sent",
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    // Save reset token to database
+    await pool.query(
+      `UPDATE users SET "resetToken" = $1, "resetTokenExpires" = $2 WHERE id = $3`,
+      [resetToken, resetTokenExpires, user.id],
+    );
+
+    // Send reset email
+    const emailSent = await sendResetPasswordEmail(user.email, resetToken);
+
+    if (!emailSent) {
+      return res.status(500).json({ error: "Failed to send reset email" });
+    }
+
+    res.json({
+      message: "If that email exists, a password reset link has been sent",
+    });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 7️⃣ RESET PASSWORD
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { email, token, newPassword } = req.body;
+
+    if (!email || !token || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Email, token, and new password are required" });
+    }
+
+    // Validate password length
+    if (newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters" });
+    }
+
+    // Find user with valid reset token
+    const result = await pool.query(
+      `SELECT * FROM users WHERE email = $1 AND "resetToken" = $2 AND "resetTokenExpires" > NOW()`,
+      [email.toLowerCase(), token],
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(400).json({
+        error: "Invalid or expired reset token",
+      });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update password and clear reset token
+    await pool.query(
+      `UPDATE users SET password = $1, "passwordChangedAt" = NOW(), "resetToken" = NULL, "resetTokenExpires" = NULL WHERE id = $2`,
+      [hashedPassword, user.id],
+    );
+
+    res.json({ message: "Password reset successful" });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 3️⃣ GET EMAIL LIST (Protected route - admin only)
+app.get("/api/users/emails", authMiddleware, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "Admin access required" });
+    }
+
+    const result = await pool.query(
+      'SELECT id, email, name, role, "createdAt" FROM users ORDER BY "createdAt" DESC',
+    );
+
+    const emails = result.rows.map((user) => ({
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      createdAt: user.createdat,
+    }));
+
+    res.json({ users: emails, count: emails.length });
+  } catch (err) {
+    console.error("Get emails error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 1️⃣ CREATE LICENSE
+app.post("/api/licenses", async (req, res) => {
+  try {
+    const { plan, maxMachines, expiresAt, phone, amount, productCode } =
+      req.body;
+
+    const reference = generateMarzPar();
+    const { key: licenseKey, productCode: storedProductCode } =
+      generateLicenseKey(productCode);
+
+    await pool.query(
+      `INSERT INTO licenses 
+       (licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        licenseKey,
+        plan,
+        maxMachines,
+        expiresAt ? new Date(expiresAt) : null,
+        JSON.stringify([]),
+        "inactive",
+        reference,
+        amount,
+        phone,
+        storedProductCode,
+      ],
+    );
+
+    await axios.post(
+      "https://wallet.wearemarz.com/api/v1/collect-money",
+      {
+        amount: amount,
+        phone_number: `${phone}`,
+        country: "UG",
+        reference: `${reference}`,
+        description: "Payment for license",
+        callback_url: "https://dawafy-be.onrender.com/marz/callback",
+      },
+      {
+        headers: {
+          Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    res
+      .status(202)
+      .json({ message: "Payment initiated", reference, licenseKey, expiresAt });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// MARZ PAYMENT CALLBACK
+app.post("/marz/callback", async (req, res) => {
+  res.status(200).json({ received: true });
+
+  try {
+    const { event_type, transaction } = req.body;
+
+    if (event_type !== "collection.completed") return;
+    if (transaction?.status !== "completed") return;
+
+    const transactionReference = transaction.uuid;
+    const paymentReference = transaction.reference;
+    if (!transactionReference) return;
+
+    // 1. Verify with Marz
+    const verifyRes = await axios.get(
+      `https://wallet.wearemarz.com/api/v1/transactions/${transactionReference}`,
+      {
+        headers: {
+          Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}`,
+        },
+      },
+    );
+
+    if (verifyRes.data?.transaction?.status !== "completed") return;
+
+    // 2. Idempotency check
+    const existing = await pool.query(
+      `SELECT status FROM licenses WHERE "paymentReference" = $1`,
+      [paymentReference],
+    );
+
+    if (existing.rows[0]?.status === "paid") return; // already processed
+
+    // 3. Safe to update now ✅ (quoted column names)
+    await pool.query(
+      `UPDATE licenses
+       SET status = 'paid', "paymentStatus" = 'completed'
+       WHERE "paymentReference" = $1`,
+      [paymentReference],
+    );
+
+    console.log("Payment verified and confirmed:", paymentReference);
+  } catch (err) {
+    console.error("Callback error:", err);
+  }
+});
+
+// 2️⃣ ACTIVATE LICENSE
+app.post("/api/licenses/activate", limiter, async (req, res) => {
+  const { error } = activateSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
+  try {
+    const { licenseKey, machineId } = req.body;
+
+    const result = await pool.query(
+      "SELECT * FROM licenses WHERE licenseKey = $1",
+      [licenseKey],
+    );
+    const license = result.rows[0];
+
+    // ✅ null check FIRST, before accessing any properties
+    if (!license) return res.status(404).json({ error: "Invalid license key" });
+    if (license.status === "revoked")
+      return res.status(403).json({ error: "License revoked" });
+    if (license.paymentStatus !== "completed")
+      return res.status(402).json({ error: "Payment not completed" });
+
+    let machineIds = license.machineids || [];
+
+    if (!machineIds.includes(machineId)) {
+      if (machineIds.length >= license.maxmachines) {
+        return res.status(403).json({ error: "Max machines reached" });
+      }
+      machineIds = [...machineIds, machineId];
+    }
+
+    await pool.query(
+      "UPDATE licenses SET machineIds = $1, status = $2 WHERE licenseKey = $3",
+      [JSON.stringify(machineIds), "active", licenseKey],
+    );
+
+    const licensePayload = {
+      licenseKey: license.licensekey,
+      plan: license.plan,
+      machineIds: machineId,
+      maxMachines: license.maxmachines,
+      expiresAt: license.expiresat,
+    };
+
+    // Extract productCode from licenseKey prefix (e.g., DENT-XXXXXX, PHARMA-XXXXXX)
+    const licenseKeyPrefix = (license.licensekey || "DWF").split("-")[0];
+    const productCode =
+      licenseKeyPrefix === "DENT" || licenseKeyPrefix === "PHARMA"
+        ? licenseKeyPrefix
+        : license.productcode || "DWF";
+
+    const signature = signLicense(licensePayload, productCode);
+
+    res.json({ license: licensePayload, signature });
+  } catch (err) {
+    console.error("Activate error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 3️⃣ REVOKE LICENSE
+app.post("/api/licenses/revoke", requireApiKey, async (req, res) => {
+  try {
+    const { licenseKey } = req.body;
+
+    await pool.query("UPDATE licenses SET status = $1 WHERE licenseKey = $2", [
+      "revoked",
+      licenseKey,
+    ]);
+
+    res.json({ message: "License revoked" });
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 4️⃣ GET USER LICENSES
+app.get("/api/user/licenses", authMiddleware, async (req, res) => {
+  try {
+    const { id } = req.user;
+    const result = await pool.query("SELECT * FROM licenses WHERE user = $1", [
+      id,
+    ]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "No licenses found" });
+    }
+    res.json(result.rows);
+  } catch (err) {
+    console.error("Get licenses error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ===================== 404 =====================
+app.use((req, res) => {
+  res.status(404).json({ error: "Route not found" });
+});
+
 // Start server
 const PORT = process.env.PORT || 5000;
+
 app.listen(PORT, () => {
   console.log(`✅ Server running on:`);
   console.log(`   Local:   http://localhost:${PORT}`);

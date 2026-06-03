@@ -429,7 +429,51 @@ async function runMigrations(client) {
           CREATE UNIQUE INDEX IF NOT EXISTS idx_pharmacyInfo_pharmacyCode ON "pharmacyInfo"("pharmacyCode");
         `);
       },
-    }
+    },
+    {
+      name: "024_add_licenses_table",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS licenses (
+            id UUID PRIMARY KEY,
+            licenseKey TEXT NOT NULL UNIQUE,
+            plan TEXT NOT NULL,
+            maxMachines INTEGER NOT NULL,
+            expiresAt TIMESTAMP NOT NULL,
+            machineIds TEXT[] NOT NULL,
+            status TEXT NOT NULL,
+            "paymentReference" TEXT,
+            "paymentStatus" TEXT DEFAULT 'pending',
+            amount DECIMAL(10,2) NOT NULL,
+            phone TEXT NOT NULL,
+            "productCode" TEXT NOT NULL,
+            user UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            "isEarlyAdopter" BOOLEAN NOT NULL DEFAULT FALSE,
+          );
+        `);
+      },
+    },
+    // add email, "isVerified", "verificationToken", "verificationExpires", "verifiedAt", "resetToken", "resetTokenExpires", "passwordChangedAt", role, "createdAt", "updatedAt" to users table
+    {
+      name: "025_add_email_and_verification_fields_to_users",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE users
+          ADD COLUMN IF NOT EXISTS email TEXT NOT NULL UNIQUE,
+          ADD COLUMN IF NOT EXISTS "isVerified" BOOLEAN NOT NULL DEFAULT FALSE,
+          ADD COLUMN IF NOT EXISTS "verificationToken" TEXT,
+          ADD COLUMN IF NOT EXISTS "verificationExpires" TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS "verifiedAt" TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS "resetToken" TEXT,
+          ADD COLUMN IF NOT EXISTS "resetTokenExpires" TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS "passwordChangedAt" TIMESTAMP,
+          ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user',
+          ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+          ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW();
+        `);
+      },
+    }  
+    
   ];
 
   for (const migration of migrations) {
