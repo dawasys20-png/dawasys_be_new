@@ -409,6 +409,27 @@ async function runMigrations(client) {
         `);
       },
     },
+    {
+      name: "022_add_billTotal_to_transactions",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE transactions
+          ADD COLUMN IF NOT EXISTS "billTotal" DECIMAL(10,2) NOT NULL DEFAULT 0;
+        `);
+      },
+    },
+    {
+      name: "023_add_pharmacyCode_to_pharmacyInfo",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE "pharmacyInfo"
+          ADD COLUMN IF NOT EXISTS "pharmacyCode" TEXT;
+        `);
+        await client.query(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_pharmacyInfo_pharmacyCode ON "pharmacyInfo"("pharmacyCode");
+        `);
+      },
+    }
   ];
 
   for (const migration of migrations) {

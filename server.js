@@ -204,8 +204,8 @@ async function addTransaction(tx) {
     `
     INSERT INTO transactions (
       id, "totalAmount", "paymentMethod", date, notes, "createdAt",
-      profit, "transactionType", "packType", "pharmacyId", "cashierId"
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      profit, "transactionType", "packType", "pharmacyId", "cashierId", "billTotal"
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
   `,
     [
       id,
@@ -219,6 +219,7 @@ async function addTransaction(tx) {
       tx.packType || null,
       tx.pharmacyId || null,
       tx.cashierId || null,
+      tx.billTotal || null,
     ],
   );
 
@@ -508,6 +509,78 @@ app.post("/api/login", async (req, res) => {
   res.json({ token, user });
 });
 
+app.post("/api/login-staff", async (req, res) => {
+  try {
+    const { username, pin: password, pharmacyCode } = req.body;
+
+    // 1. Get staff joined with pharmacy (verify pharmacyCode)
+    const staffResult = await query(
+      `
+      SELECT s.*
+      FROM staff s
+      JOIN "pharmacyInfo" p ON s."pharmacyId" = p.id
+      WHERE s."userName" = $1
+        AND p."pharmacyCode" = $2
+      `,
+      [username, pharmacyCode],
+    );
+
+    const staff = staffResult.rows[0];
+
+    if (!staff) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // 2. Validate PIN exists
+    if (!password || !staff.pin) {
+      return res.status(400).json({
+        error: "Missing password or stored PIN",
+      });
+    }
+
+    // 3. Verify PIN (bcrypt)
+    const validPassword = bcrypt.compareSync(password, staff.pin);
+
+    if (!validPassword) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // 4. Fetch pharmacy
+    const pharmacyResult = await query(
+      `
+      SELECT *
+      FROM "pharmacyInfo"
+      WHERE id = $1
+      `,
+      [staff.pharmacyId],
+    );
+
+    const pharmacy = pharmacyResult.rows[0];
+
+    // 5. Build JWT payload
+    const staffPayload = {
+      ...staff,
+      username: staff.userName,
+    };
+
+    delete staffPayload.userName;
+
+    const token = jwt.sign(staffPayload, process.env.JWT_SECRET || "secret", {
+      expiresIn: "8h",
+    });
+
+    // 6. Response
+    res.json({
+      token,
+      staff,
+      pharmacy,
+    });
+  } catch (error) {
+    console.error("Login staff error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.post("/api/register", async (req, res) => {
   const { username, password, phone } = req.body;
   if (await getUserByUsername(username))
@@ -609,15 +682,26 @@ app.get("/api/inventoryMovements/:medicineId", async (req, res) =>
 
 // User pharmacy registration (kept for backward compatibility)
 app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
-  const { name, address, contactNumber, phone, email } = req.body;
+  const { name, address, contactNumber, phone, email, pharmacyCode } = req.body;
   const userId = req.user.id;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   await query(
-    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt") ' +
-      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
-    [id, name, address, contactNumber, phone, email, userId, now, now],
+    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode") ' +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    [
+      id,
+      name,
+      address,
+      contactNumber,
+      phone,
+      email,
+      userId,
+      now,
+      now,
+      pharmacyCode,
+    ],
   );
 
   // Check if first pharmacy for user, create admin staff
@@ -634,7 +718,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
       'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
         "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
       [
-        staffId,
+        req.user.id, // Use user ID as staff ID for admin
         req.user.username,
         "admin",
         contactNumber || null,
@@ -654,6 +738,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
       contactNumber,
       phone,
       email,
+      pharmacyCode,
       createdAt: now,
       updatedAt: now,
     },
