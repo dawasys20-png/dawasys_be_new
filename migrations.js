@@ -447,8 +447,8 @@ async function runMigrations(client) {
             amount DECIMAL(10,2) NOT NULL,
             phone TEXT NOT NULL,
             "productCode" TEXT NOT NULL,
-            user UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            "isEarlyAdopter" BOOLEAN NOT NULL DEFAULT FALSE,
+            "user" UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            "isEarlyAdopter" BOOLEAN NOT NULL DEFAULT FALSE
           );
         `);
       },
@@ -459,7 +459,7 @@ async function runMigrations(client) {
       up: async (client) => {
         await client.query(`
           ALTER TABLE users
-          ADD COLUMN IF NOT EXISTS email TEXT NOT NULL UNIQUE,
+          ADD COLUMN IF NOT EXISTS email TEXT UNIQUE,
           ADD COLUMN IF NOT EXISTS "isVerified" BOOLEAN NOT NULL DEFAULT FALSE,
           ADD COLUMN IF NOT EXISTS "verificationToken" TEXT,
           ADD COLUMN IF NOT EXISTS "verificationExpires" TIMESTAMP,

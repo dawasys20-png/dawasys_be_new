@@ -1,3 +1,7 @@
+const pg = require("pg");
+pg.types.setTypeParser(1114, (str) => str ? str.replace(" ", "T") + "Z" : null);
+pg.types.setTypeParser(1184, (str) => str ? str.replace(" ", "T") + "Z" : null);
+
 require("dotenv").config();
 const express = require("express");
 const path = require("path");
@@ -6,6 +10,7 @@ const crypto = require("crypto");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
+const Joi = require("joi")
 const morgan = require("morgan");
 const { runMigrations } = require("./migrations");
 const rateLimit = require("express-rate-limit");
@@ -34,11 +39,14 @@ const {
   getInventoryMovementsByMedicineId,
   getInventoryMovements,
   getUserByUsername,
+  getTransactions,
+  deleteTransaction,
 } = require("./lib/dbFunc");
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 100,
+  skip: (req) => req.method === "OPTIONS",
   message: { error: "Too many requests" },
 });
 
@@ -150,14 +158,13 @@ const activateSchema = Joi.object({
 const app = express();
 
 app.set("trust proxy", 1);
-
-app.use(limiter);
-app.use(morgan("tiny"));
-app.use(express.json());
 app.use(cors());
 
+app.use(morgan("tiny"));
+app.use(express.json());
+
 // Users
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", limiter, async (req, res) => {
   const { username, password } = req.body;
   console.log(username, password, "login attempt");
   const user = await getUserByUsername(username);
@@ -173,7 +180,7 @@ app.post("/api/login", async (req, res) => {
   res.json({ token, user });
 });
 
-app.post("/api/login-staff", async (req, res) => {
+app.post("/api/login-staff", limiter, async (req, res) => {
   try {
     const { username, pin: password, pharmacyCode } = req.body;
 
@@ -191,8 +198,9 @@ app.post("/api/login-staff", async (req, res) => {
 
     const staff = staffResult.rows[0];
 
+
     if (!staff) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      return res.status(401).json({ error: "Invalid credentials  xxxx" });
     }
 
     // 2. Validate PIN exists
@@ -245,7 +253,7 @@ app.post("/api/login-staff", async (req, res) => {
   }
 });
 
-app.post("/api/register", async (req, res) => {
+app.post("/api/register", limiter, async (req, res) => {
   const { username, password, phone } = req.body;
   if (await getUserByUsername(username))
     return res.status(400).json({ error: "Username already exists" });
@@ -371,43 +379,43 @@ app.post("/api/pharmacy", authMiddleware, async (req, res) => {
 });
 
 // Medicines
-app.get("/api/medicines", async (req, res) =>
+app.get("/api/medicines", authMiddleware, async (req, res) =>
   res.json(await getMedicines(req.query.pharmacyId || null)),
 );
-app.get("/api/medicines/:id", async (req, res) => {
+app.get("/api/medicines/:id", authMiddleware, async (req, res) => {
   const medicine = await getMedicineById(req.params.id);
   if (!medicine) return res.status(404).json({ error: "Not found" });
   res.json(medicine);
 });
-app.post("/api/medicines", async (req, res) =>
+app.post("/api/medicines", authMiddleware, async (req, res) =>
   res.json(await addMedicine(req.body)),
 );
-app.put("/api/medicines/:id", async (req, res) => {
+app.put("/api/medicines/:id", authMiddleware, async (req, res) => {
   try {
     res.json(await updateMedicine(req.params.id, req.body));
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
-app.delete("/api/medicines/:id", async (req, res) => {
+app.delete("/api/medicines/:id", authMiddleware, async (req, res) => {
   await deleteMedicine(req.params.id);
   res.json({ success: true });
 });
 
 // Transactions
-app.get("/api/transactions", async (req, res) =>
+app.get("/api/transactions", authMiddleware, async (req, res) =>
   res.json(await getTransactions(req.query.pharmacyId || null)),
 );
-app.post("/api/transactions", async (req, res) =>
+app.post("/api/transactions", authMiddleware, async (req, res) =>
   res.json(await addTransaction(req.body)),
 );
-app.delete("/api/transactions/:id", async (req, res) => {
+app.delete("/api/transactions/:id", authMiddleware, async (req, res) => {
   await deleteTransaction(req.params.id);
   res.json({ success: true });
 });
 
 // cashier transactions
-app.get("/api/transactions/cashier/:cashierId", async (req, res) =>
+app.get("/api/transactions/cashier/:cashierId",  authMiddleware, async (req, res) =>
   res.json(await getTransactionsByCashierId(req.params.cashierId)),
 );
 
@@ -429,13 +437,13 @@ app.post("/api/settings", async (req, res) => {
 });
 
 // Inventory Movements
-app.get("/api/inventoryMovements", async (req, res) =>
+app.get("/api/inventoryMovements", authMiddleware,  async (req, res) =>
   res.json(await getInventoryMovements()),
 );
-app.post("/api/inventoryMovements", async (req, res) =>
+app.post("/api/inventoryMovements", authMiddleware, async (req, res) =>
   res.json(await addInventoryMovement(req.body)),
 );
-app.delete("/api/inventoryMovements/:id", async (req, res) => {
+app.delete("/api/inventoryMovements/:id", authMiddleware, async (req, res) => {
   await deleteInventoryMovement(req.params.id);
   res.json({ success: true });
 });
@@ -522,10 +530,40 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
 });
 
 // Get all pharmacies
-app.get("/api/pharmacies", async (req, res) => {
+app.get("/api/pharmacies", authMiddleware, async (req, res) => {
   const result = await query('SELECT * FROM "pharmacyInfo"');
 
   res.json(result.rows);
+});
+
+// Get pharmacy by ID
+app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
+  const result = await query('SELECT * FROM "pharmacyInfo" WHERE id = $1', [
+    req.params.id,
+  ]);
+  const pharmacy = result.rows[0];
+  if (!pharmacy) return res.status(404).json({ error: "Not found" });
+
+  res.json(pharmacy);
+});
+
+// Update pharmacy by ID
+app.put("/api/pharmacy/:id", authMiddleware, async (req, res) => {
+  const { name, address, contactNumber, phone, email, pharmacyCode } = req.body;
+  const now = new Date().toISOString();
+  const fields = [];
+  if (name) fields.push(`name = '${name}'`);
+  if (address) fields.push(`address = '${address}'`);
+  if (contactNumber) fields.push(`contactNumber = '${contactNumber}'`);
+  if (phone) fields.push(`phone = '${phone}'`);
+  if (email) fields.push(`email = '${email}'`);
+  if (pharmacyCode) fields.push(`pharmacyCode = '${pharmacyCode}'`);
+  fields.push(`"updatedAt" = '${now}'`);
+  await query(
+    `UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $1`,
+    [req.params.id],
+  );
+  res.json({ success: true });
 });
 
 // Staff registration
@@ -572,13 +610,13 @@ app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
 // Verify staff PIN
 app.post("/api/staff/verify-pin", authMiddleware, async (req, res) => {
   const { staffId, pin, role } = req.body;
-  if (role === "admin") {
-    const user = await getUserByUsername(req.user.username);
-    if (!user) return res.status(404).json({ error: "User not found" });
-    if (!bcrypt.compareSync(pin, user.password))
-      return res.status(401).json({ error: "Invalid PIN" });
-    return res.json({ success: true });
-  }
+  // if (role === "admin") {
+  //   const user = await getUserByUsername(req.user.username);
+  //   if (!user) return res.status(404).json({ error: "User not found" });
+  //   if (!bcrypt.compareSync(pin, user.password))
+  //     return res.status(401).json({ error: "Invalid PIN" });
+  //   return res.json({ success: true });
+  // }
 
   const result = await query("SELECT * FROM staff WHERE id = $1", [staffId]);
   const staff = result.rows[0];
