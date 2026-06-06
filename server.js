@@ -254,17 +254,17 @@ app.post("/api/login-staff", limiter, async (req, res) => {
 });
 
 app.post("/api/register", limiter, async (req, res) => {
-  const { username, password, phone } = req.body;
+  const { username, password, phone, email } = req.body;
   if (await getUserByUsername(username))
     return res.status(400).json({ error: "Username already exists" });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
-    'INSERT INTO users (id, username, password, phone, "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6)',
-    [id, username, hashPassword(password), phone, now, now],
+    'INSERT INTO users (id, username, password, phone, email, "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7)',
+    [id, username, hashPassword(password), phone, email, now, now],
   );
 
-  res.json({ id, username, phone, createdAt: now, updatedAt: now });
+  res.json({ id, username, phone, email, createdAt: now, updatedAt: now });
 });
 
 // 2️⃣ VERIFY EMAIL
@@ -362,6 +362,104 @@ app.post("/api/auth/resend-verification", async (req, res) => {
     });
   } catch (err) {
     console.error("Resend verification error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 6️⃣ FORGOT PASSWORD
+app.post("/api/auth/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Find user by email
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
+      email.toLowerCase(),
+    ]);
+
+    const user = result.rows[0];
+
+    // Always return success to prevent email enumeration
+    if (!user) {
+      return res.json({
+        message: "If that email exists, a password reset link has been sent",
+      });
+    }
+
+    // Generate reset token
+    const resetToken = crypto.randomBytes(32).toString("hex");
+    const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    // Save reset token to database
+    await pool.query(
+      `UPDATE users SET "resetToken" = $1, "resetTokenExpires" = $2 WHERE id = $3`,
+      [resetToken, resetTokenExpires, user.id],
+    );
+
+    // Send reset email
+    const emailSent = await sendResetPasswordEmail(user.email, resetToken);
+
+    if (!emailSent) {
+      return res.status(500).json({ error: "Failed to send reset email" });
+    }
+
+    res.json({
+      message: "If that email exists, a password reset link has been sent",
+    });
+  } catch (err) {
+    console.error("Forgot password error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// 7️⃣ RESET PASSWORD
+app.post("/api/auth/reset-password", async (req, res) => {
+  try {
+    const { email, token, newPassword } = req.body;
+
+    if (!email || !token || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Email, token, and new password are required" });
+    }
+
+    // Validate password length
+    if (newPassword.length < 6) {
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters" });
+    }
+
+    // Find user with valid reset token
+    const result = await pool.query(
+      `SELECT * FROM users WHERE email = $1 AND "resetToken" = $2 AND "resetTokenExpires" > NOW()`,
+      [email.toLowerCase(), token],
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(400).json({
+        error: "Invalid or expired reset token",
+      });
+    }
+
+    // Hash new password
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(newPassword, salt);
+
+    // Update password and clear reset token
+    await pool.query(
+      `UPDATE users SET password = $1, "passwordChangedAt" = NOW(), "resetToken" = NULL, "resetTokenExpires" = NULL WHERE id = $2`,
+      [hashedPassword, user.id],
+    );
+
+    res.json({ message: "Password reset successful" });
+  } catch (err) {
+    console.error("Reset password error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -548,8 +646,8 @@ app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
 });
 
 // Update pharmacy by ID
-app.put("/api/pharmacy/:id", authMiddleware, async (req, res) => {
-  const { name, address, contactNumber, phone, email, pharmacyCode } = req.body;
+app.put("/api/pharmacy", authMiddleware, async (req, res) => {
+  const { name, address, contactNumber, phone, email, pharmacyCode, pharmacyId } = req.body;
   const now = new Date().toISOString();
   const fields = [];
   if (name) fields.push(`name = '${name}'`);
@@ -561,7 +659,7 @@ app.put("/api/pharmacy/:id", authMiddleware, async (req, res) => {
   fields.push(`"updatedAt" = '${now}'`);
   await query(
     `UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $1`,
-    [req.params.id],
+    [pharmacyId],
   );
   res.json({ success: true });
 });
@@ -610,13 +708,13 @@ app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
 // Verify staff PIN
 app.post("/api/staff/verify-pin", authMiddleware, async (req, res) => {
   const { staffId, pin, role } = req.body;
-  // if (role === "admin") {
-  //   const user = await getUserByUsername(req.user.username);
-  //   if (!user) return res.status(404).json({ error: "User not found" });
-  //   if (!bcrypt.compareSync(pin, user.password))
-  //     return res.status(401).json({ error: "Invalid PIN" });
-  //   return res.json({ success: true });
-  // }
+  if (role === "admin") {
+    const user = await getUserByUsername(req.user.username);
+    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!bcrypt.compareSync(pin, user.password))
+      return res.status(401).json({ error: "Invalid PIN" });
+    return res.json({ success: true });
+  }
 
   const result = await query("SELECT * FROM staff WHERE id = $1", [staffId]);
   const staff = result.rows[0];
@@ -685,104 +783,6 @@ app.delete("/api/staff/:id", authMiddleware, async (req, res) => {
     return res.status(404).json({ error: "Staff not found" });
   }
   res.json({ success: true });
-});
-
-// 6️⃣ FORGOT PASSWORD
-app.post("/api/auth/forgot-password", async (req, res) => {
-  try {
-    const { email } = req.body;
-
-    if (!email) {
-      return res.status(400).json({ error: "Email is required" });
-    }
-
-    // Find user by email
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
-      email.toLowerCase(),
-    ]);
-
-    const user = result.rows[0];
-
-    // Always return success to prevent email enumeration
-    if (!user) {
-      return res.json({
-        message: "If that email exists, a password reset link has been sent",
-      });
-    }
-
-    // Generate reset token
-    const resetToken = crypto.randomBytes(32).toString("hex");
-    const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
-
-    // Save reset token to database
-    await pool.query(
-      `UPDATE users SET "resetToken" = $1, "resetTokenExpires" = $2 WHERE id = $3`,
-      [resetToken, resetTokenExpires, user.id],
-    );
-
-    // Send reset email
-    const emailSent = await sendResetPasswordEmail(user.email, resetToken);
-
-    if (!emailSent) {
-      return res.status(500).json({ error: "Failed to send reset email" });
-    }
-
-    res.json({
-      message: "If that email exists, a password reset link has been sent",
-    });
-  } catch (err) {
-    console.error("Forgot password error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// 7️⃣ RESET PASSWORD
-app.post("/api/auth/reset-password", async (req, res) => {
-  try {
-    const { email, token, newPassword } = req.body;
-
-    if (!email || !token || !newPassword) {
-      return res
-        .status(400)
-        .json({ error: "Email, token, and new password are required" });
-    }
-
-    // Validate password length
-    if (newPassword.length < 6) {
-      return res
-        .status(400)
-        .json({ error: "Password must be at least 6 characters" });
-    }
-
-    // Find user with valid reset token
-    const result = await pool.query(
-      `SELECT * FROM users WHERE email = $1 AND "resetToken" = $2 AND "resetTokenExpires" > NOW()`,
-      [email.toLowerCase(), token],
-    );
-
-    const user = result.rows[0];
-
-    if (!user) {
-      return res.status(400).json({
-        error: "Invalid or expired reset token",
-      });
-    }
-
-    // Hash new password
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(newPassword, salt);
-
-    // Update password and clear reset token
-    await pool.query(
-      `UPDATE users SET password = $1, "passwordChangedAt" = NOW(), "resetToken" = NULL, "resetTokenExpires" = NULL WHERE id = $2`,
-      [hashedPassword, user.id],
-    );
-
-    res.json({ message: "Password reset successful" });
-  } catch (err) {
-    console.error("Reset password error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
 });
 
 // 3️⃣ GET EMAIL LIST (Protected route - admin only)
