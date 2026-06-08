@@ -862,7 +862,7 @@ app.get("/api/users/emails", authMiddleware, async (req, res) => {
 });
 
 // 1️⃣ CREATE LICENSE
-app.post("/api/licenses", async (req, res) => {
+app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
   try {
     const { plan, maxMachines, expiresAt, phone, amount, productCode } =
       req.body;
@@ -873,8 +873,8 @@ app.post("/api/licenses", async (req, res) => {
 
     await pool.query(
       `INSERT INTO licenses 
-       ("licenseKey", plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+       (licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
       [
         licenseKey,
         plan,
@@ -886,6 +886,7 @@ app.post("/api/licenses", async (req, res) => {
         amount,
         phone,
         storedProductCode,
+        req.user.id, // Assuming the authenticated user's ID is available in req.user.id
       ],
     );
 
@@ -1043,7 +1044,7 @@ app.post("/api/licenses/revoke", requireApiKey, async (req, res) => {
 app.get("/api/user/licenses", authMiddleware, async (req, res) => {
   try {
     const { id } = req.user;
-    const result = await pool.query("SELECT * FROM licenses WHERE user = $1", [
+    const result = await pool.query(`SELECT * FROM licenses WHERE "userId" = $1`, [
       id,
     ]);
     if (result.rows.length === 0) {
