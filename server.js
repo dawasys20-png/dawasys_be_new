@@ -889,14 +889,14 @@ app.post("/api/licenses", async (req, res) => {
     );
 
     await axios.post(
-      "https://wallet.wearemarz.com/api/v1/collect-money",
+      `${process.env.MARZ_API_URL}/collect-money`,
       {
         amount: amount,
         phone_number: `${phone}`,
         country: "UG",
         reference: `${reference}`,
         description: "Payment for license",
-        callback_url: "https://dawafy-be.onrender.com/marz/callback",
+        callback_url: process.env.MARZ_API_CALLBACK_URL,
       },
       {
         headers: {
@@ -931,7 +931,7 @@ app.post("/marz/callback", async (req, res) => {
 
     // 1. Verify with Marz
     const verifyRes = await axios.get(
-      `https://wallet.wearemarz.com/api/v1/transactions/${transactionReference}`,
+      `${process.env.MARZ_API_URL}/transactions/${transactionReference}`,
       {
         headers: {
           Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}`,
