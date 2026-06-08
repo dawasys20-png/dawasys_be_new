@@ -871,11 +871,14 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
     const { key: licenseKey, productCode: storedProductCode } =
       generateLicenseKey(productCode);
 
+      const id = uuid.v4();
+
     await pool.query(
       `INSERT INTO licenses 
-       (licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+       (id, licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
       [
+        id,
         licenseKey,
         plan,
         maxMachines,
