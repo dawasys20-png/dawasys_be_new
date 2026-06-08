@@ -880,7 +880,7 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
         plan,
         maxMachines,
         expiresAt ? new Date(expiresAt) : null,
-        JSON.stringify([]),
+        [],
         "inactive",
         reference,
         amount,
@@ -997,7 +997,7 @@ app.post("/api/licenses/activate", limiter, async (req, res) => {
 
     await pool.query(
       "UPDATE licenses SET machineIds = $1, status = $2 WHERE licenseKey = $3",
-      [JSON.stringify(machineIds), "active", licenseKey],
+      [machineIds, "active", licenseKey],
     );
 
     const licensePayload = {
@@ -1011,7 +1011,7 @@ app.post("/api/licenses/activate", limiter, async (req, res) => {
     // Extract productCode from licenseKey prefix (e.g., DENT-XXXXXX, PHARMA-XXXXXX)
     const licenseKeyPrefix = (license.licensekey || "DWF").split("-")[0];
     const productCode =
-      licenseKeyPrefix === "DENT" || licenseKeyPrefix === "PHARMA"
+      licenseKeyPrefix === "DENT" || licenseKeyPrefix === "DAWASYS"
         ? licenseKeyPrefix
         : license.productcode || "DWF";
 
