@@ -873,7 +873,7 @@ app.post("/api/licenses", async (req, res) => {
 
     await pool.query(
       `INSERT INTO licenses 
-       (licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode")
+       ("licenseKey", plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         licenseKey,
