@@ -77,23 +77,23 @@ const pool = new Pool({
 
 // ===================== CONFIG =====================
 let PRIVATE_KEY;
-let PHARMA_PRIVATE_KEY;
+let DAWASYS_PRIVATE_KEY;
 let DENT_PRIVATE_KEY;
 
 try {
-  PRIVATE_KEY = fs.readFileSync("./private.pem", "utf8");
+  PRIVATE_KEY = process.env.PRIVATE_PRIVATE_KEY.replace(/\\n/g, "\n");
 } catch (err) {
   console.log("Generated new private key");
 }
 
 try {
-  PHARMA_PRIVATE_KEY = fs.readFileSync("./pem/pharma.pem", "utf8");
+  DAWASYS_PRIVATE_KEY = process.env.DAWASYS_PRIVATE_KEY.replace(/\\n/g, "\n");
 } catch (err) {
-  console.log("Pharma private key not found");
+  console.log("DAWASYS private key not found");
 }
 
 try {
-  DENT_PRIVATE_KEY = fs.readFileSync("./pem/dent.pem", "utf8");
+  DENT_PRIVATE_KEY = process.env.DENT_PRIVATE_KEY.replace(/\\n/g, "\n");
 } catch (err) {
   console.log("Dent private key not found");
 }
@@ -103,8 +103,8 @@ try {
 // --------------------------
 
 function getPrivateKey(productCode) {
-  if (productCode?.toUpperCase().startsWith("PHARMA")) {
-    return PHARMA_PRIVATE_KEY || PRIVATE_KEY;
+  if (productCode?.toUpperCase().startsWith("DAWASYS")) {
+    return DAWASYS_PRIVATE_KEY || PRIVATE_KEY;
   }
   if (productCode?.toUpperCase().startsWith("DENT")) {
     return DENT_PRIVATE_KEY || PRIVATE_KEY;
@@ -573,30 +573,52 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
     ],
   );
 
-  // Check if first pharmacy for user, create admin staff
   const result = await query(
     'SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1',
     [userId],
   );
+
   const pharmacyCount = parseInt(result.rows[0].count, 10);
-  let staffId;
+  let staffId = null;
+
   if (pharmacyCount === 1) {
-    staffId = crypto.randomUUID();
-    const hashedPin = hashPassword("1234"); // Default PIN, should be changed by user
+    staffId = req.user.id;
+
+    const hashedPin = hashPassword("1234");
+
     await query(
-      'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+      'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyIds", "createdAt", "updatedAt") ' +
+        "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)",
       [
-        req.user.id, // Use user ID as staff ID for admin
+        req.user.id,
         req.user.username,
         "admin",
         contactNumber || null,
         hashedPin,
-        id,
+        JSON.stringify([id]),
         now,
         now,
       ],
     );
+  } else {
+    // Add new pharmacy to existing admin staff
+    const staff = await query(
+      'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+      [req.user.id],
+    );
+
+    if (staff.rows.length > 0) {
+      const pharmacyIds = staff.rows[0].pharmacyIds || "[]";
+      
+      if (!pharmacyIds.includes(id)) {
+        pharmacyIds.push(id);
+
+        await query(
+          'UPDATE staff SET "pharmacyIds" = $1::jsonb, "updatedAt" = $2 WHERE id = $3',
+          [JSON.stringify(pharmacyIds), now, req.user.id],
+        );
+      }
+    }
   }
 
   res.json({
@@ -611,7 +633,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
       createdAt: now,
       updatedAt: now,
     },
-    staffId: pharmacyCount === 1 ? staffId : null,
+    staffId,
   });
 });
 
@@ -666,28 +688,50 @@ app.put("/api/pharmacy", authMiddleware, async (req, res) => {
 
 // Staff registration
 app.post("/api/staff", authMiddleware, async (req, res) => {
-  const { userName, role, contactNumber, pin, pharmacyId } = req.body;
-
-  // Validate required pharmacyId
-  if (!pharmacyId || pharmacyId.trim() === "") {
-    return res.status(400).json({ error: "pharmacyId is required" });
-  }
+  const {
+    userName,
+    role,
+    contactNumber,
+    pin,
+    pharmacyId,
+  } = req.body;
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   const hashedPin = hashPassword(pin);
+
+  const pharmacyIds = pharmacyId ? [pharmacyId] : [];
+
   await query(
-    'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyId", "createdAt", "updatedAt") ' +
-      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-    [id, userName, role, contactNumber, hashedPin, pharmacyId, now, now],
+    `INSERT INTO staff (
+      id,
+      "userName",
+      role,
+      "contactNumber",
+      pin,
+      "pharmacyIds",
+      "createdAt",
+      "updatedAt"
+    )
+    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)`,
+    [
+      id,
+      userName,
+      role,
+      contactNumber,
+      hashedPin,
+      JSON.stringify(pharmacyIds),
+      now,
+      now,
+    ],
   );
+
   res.json({
     id,
     userName,
     role,
     contactNumber,
-    pin: hashedPin,
-    pharmacyId,
+    pharmacyIds,
     createdAt: now,
     updatedAt: now,
   });
@@ -695,14 +739,18 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
 
 // Get staff by pharmacy ID
 app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
-  const result = await query(
-    'SELECT * FROM staff WHERE "pharmacyId" = $1 ORDER BY "createdAt" DESC',
+  const { rows } = await query(
+    `
+    SELECT *
+    FROM staff
+    WHERE "pharmacyIds" ? $1
+    ORDER BY "createdAt" DESC
+    `,
     [req.params.pharmacyId],
   );
-  const staff = result.rows;
-  if (!staff || staff.length === 0)
+  if (!rows || rows.length === 0)
     return res.status(404).json({ error: "Not found" });
-  res.json(staff);
+  res.json(rows);
 });
 
 // Verify staff PIN

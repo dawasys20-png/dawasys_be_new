@@ -472,8 +472,57 @@ async function runMigrations(client) {
           ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW();
         `);
       },
-    }  
-    
+    },
+    {
+      name: "026_make_pharmacyId_array_of_ids",
+      up: async (client) => {
+        // Add new jsonb column
+        await client.query(`
+      ALTER TABLE staff
+      ADD COLUMN IF NOT EXISTS "pharmacyIds" JSONB;
+    `);
+
+        // Migrate existing pharmacyId values
+        await client.query(`
+      UPDATE staff
+      SET "pharmacyIds" = jsonb_build_array("pharmacyId")
+      WHERE "pharmacyId" IS NOT NULL
+        AND "pharmacyIds" IS NULL;
+    `);
+
+        // Default empty array for any remaining rows
+        await client.query(`
+      UPDATE staff
+      SET "pharmacyIds" = '[]'::jsonb
+      WHERE "pharmacyIds" IS NULL;
+    `);
+
+        // Make column required
+        await client.query(`
+      ALTER TABLE staff
+      ALTER COLUMN "pharmacyIds" SET NOT NULL;
+    `);
+
+        // Remove old foreign key constraint if it exists
+        await client.query(`
+      ALTER TABLE staff
+      DROP CONSTRAINT IF EXISTS staff_pharmacyId_fkey;
+    `);
+
+        // Remove old column
+        await client.query(`
+      ALTER TABLE staff
+      DROP COLUMN IF EXISTS "pharmacyId";
+    `);
+
+        // Index for fast lookups
+        await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_staff_pharmacyIds
+      ON staff
+      USING GIN ("pharmacyIds");
+    `);
+      },
+    },
   ];
 
   for (const migration of migrations) {
