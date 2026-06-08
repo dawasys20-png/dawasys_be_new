@@ -66,21 +66,6 @@ async function runMigrations(client) {
         `);
 
         await client.query(`
-          CREATE TABLE IF NOT EXISTS licenses (
-            id UUID PRIMARY KEY,
-            key TEXT NOT NULL UNIQUE,
-            type TEXT NOT NULL CHECK (type IN ('trial', 'purchased')),
-            "licenseType" TEXT NOT NULL,
-            status TEXT NOT NULL CHECK (status IN ('active', 'expired')),
-            "activationDate" TIMESTAMP NOT NULL,
-            "expiryDate" TIMESTAMP,
-            "maxMachines" INTEGER NOT NULL,
-            "machineIds" TEXT NOT NULL,
-            "createdAt" TIMESTAMP NOT NULL
-          );
-        `);
-
-        await client.query(`
           CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -97,32 +82,6 @@ async function runMigrations(client) {
         await client.query(`
           CREATE INDEX IF NOT EXISTS "idx_transactionItems_transactionId" ON "transactionItems"("transactionId");
         `);
-      },
-    },
-
-    {
-      name: "002_add_inactive_license_status",
-      up: async (client) => {
-        await client.query(`
-          ALTER TABLE licenses
-          ADD COLUMN IF NOT EXISTS status TEXT CHECK (status IN ('active', 'expired', 'inactive'));
-        `);
-        // Update existing rows to have 'active' status if needed
-        await client.query(
-          `UPDATE licenses SET status = 'active' WHERE status IS NULL`,
-        );
-        await client.query(
-          `ALTER TABLE licenses ALTER COLUMN status SET NOT NULL`,
-        );
-      },
-    },
-
-    {
-      name: "003_add_signature_to_licenses",
-      up: async (client) => {
-        await client.query(
-          `ALTER TABLE licenses ADD COLUMN IF NOT EXISTS signature TEXT;`,
-        );
       },
     },
 
@@ -447,7 +406,7 @@ async function runMigrations(client) {
             amount DECIMAL(10,2) NOT NULL,
             phone TEXT NOT NULL,
             "productCode" TEXT NOT NULL,
-            "user" UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            "userId" UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             "isEarlyAdopter" BOOLEAN NOT NULL DEFAULT FALSE
           );
         `);
@@ -520,15 +479,6 @@ async function runMigrations(client) {
       CREATE INDEX IF NOT EXISTS idx_staff_pharmacyIds
       ON staff
       USING GIN ("pharmacyIds");
-    `);
-      },
-    },
-    {
-      name: "027_rename_key_to_licenseKey",
-      up: async (client) => {
-        await client.query(`
-      ALTER TABLE licenses
-      RENAME COLUMN key TO "licenseKey";
     `);
       },
     },
