@@ -523,6 +523,15 @@ async function runMigrations(client) {
     `);
       },
     },
+    {
+      name: "027_rename_key_to_licenseKey",
+      up: async (client) => {
+        await client.query(`
+      ALTER TABLE licenses
+      RENAME COLUMN key TO "licenseKey";
+    `);
+      },
+    },
   ];
 
   for (const migration of migrations) {
