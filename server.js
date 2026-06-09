@@ -192,7 +192,9 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       `
       SELECT s.*
       FROM staff s
-      JOIN "pharmacyInfo" p ON s."pharmacyId" = p.id
+      JOIN "pharmacyInfo" p ON p.id = ANY(
+        ARRAY(SELECT jsonb_array_elements_text(s."pharmacyIds")::int)
+      )
       WHERE s."userName" = $1
         AND p."pharmacyCode" = $2
       `,
@@ -201,9 +203,8 @@ app.post("/api/login-staff", limiter, async (req, res) => {
 
     const staff = staffResult.rows[0];
 
-
     if (!staff) {
-      return res.status(401).json({ error: "Invalid credentials  xxxx" });
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
     // 2. Validate PIN exists
@@ -225,9 +226,9 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       `
       SELECT *
       FROM "pharmacyInfo"
-      WHERE id = $1
+      WHERE "pharmacyCode" = $1
       `,
-      [staff.pharmacyId],
+      [pharmacyCode],
     );
 
     const pharmacy = pharmacyResult.rows[0];
