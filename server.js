@@ -193,7 +193,7 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       SELECT s.*
       FROM staff s
       JOIN "pharmacyInfo" p ON p.id = ANY(
-        ARRAY(SELECT jsonb_array_elements_text(s."pharmacyIds")::int)
+        ARRAY(SELECT jsonb_array_elements_text(s."pharmacyIds")::uuid)
       )
       WHERE s."userName" = $1
         AND p."pharmacyCode" = $2
