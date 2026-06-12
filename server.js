@@ -1,6 +1,10 @@
 const pg = require("pg");
-pg.types.setTypeParser(1114, (str) => str ? str.replace(" ", "T") + "Z" : null);
-pg.types.setTypeParser(1184, (str) => str ? str.replace(" ", "T") + "Z" : null);
+pg.types.setTypeParser(1114, (str) =>
+  str ? str.replace(" ", "T") + "Z" : null,
+);
+pg.types.setTypeParser(1184, (str) =>
+  str ? str.replace(" ", "T") + "Z" : null,
+);
 
 require("dotenv").config();
 const express = require("express");
@@ -10,7 +14,7 @@ const crypto = require("crypto");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
-const Joi = require("joi")
+const Joi = require("joi");
 const morgan = require("morgan");
 const { runMigrations } = require("./migrations");
 const rateLimit = require("express-rate-limit");
@@ -44,7 +48,6 @@ const {
 } = require("./lib/dbFunc");
 const uuid = require("uuid");
 const axios = require("axios");
-
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -517,8 +520,11 @@ app.delete("/api/transactions/:id", authMiddleware, async (req, res) => {
 });
 
 // cashier transactions
-app.get("/api/transactions/cashier/:cashierId",  authMiddleware, async (req, res) =>
-  res.json(await getTransactionsByCashierId(req.params.cashierId)),
+app.get(
+  "/api/transactions/cashier/:cashierId",
+  authMiddleware,
+  async (req, res) =>
+    res.json(await getTransactionsByCashierId(req.params.cashierId)),
 );
 
 // Licenses
@@ -539,7 +545,7 @@ app.post("/api/settings", async (req, res) => {
 });
 
 // Inventory Movements
-app.get("/api/inventoryMovements", authMiddleware,  async (req, res) =>
+app.get("/api/inventoryMovements", authMiddleware, async (req, res) =>
   res.json(await getInventoryMovements()),
 );
 app.post("/api/inventoryMovements", authMiddleware, async (req, res) =>
@@ -588,7 +594,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
   if (pharmacyCount === 1) {
     staffId = req.user.id;
 
-    const hashedPin = hashPassword("1234");
+    const hashedPin = hashPassword("3ZjMHZNQVBnOmA3wxfO3lFpf4");
 
     await query(
       'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyIds", "createdAt", "updatedAt") ' +
@@ -606,14 +612,13 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
     );
   } else {
     // Add new pharmacy to existing admin staff
-    const staff = await query(
-      'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-      [req.user.id],
-    );
+    const staff = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [
+      req.user.id,
+    ]);
 
     if (staff.rows.length > 0) {
       const pharmacyIds = staff.rows[0].pharmacyIds || "[]";
-      
+
       if (!pharmacyIds.includes(id)) {
         pharmacyIds.push(id);
 
@@ -660,6 +665,31 @@ app.get("/api/pharmacies", authMiddleware, async (req, res) => {
   res.json(result.rows);
 });
 
+// Get user pharmacies
+app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
+  const staffResult = await query(
+    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+    [req.user.id],
+  );
+
+  if (staffResult.rows.length === 0) {
+    return res.status(404).json({ error: "Staff not found" });
+  }
+
+  const pharmacyIds = staffResult.rows[0].pharmacyIds || [];
+
+  if (pharmacyIds.length === 0) {
+    return res.json([]);
+  }
+
+  const pharmaciesResult = await query(
+    'SELECT * FROM "pharmacyInfo" WHERE id = ANY($1::uuid[])',
+    [pharmacyIds],
+  );
+
+  res.json(pharmaciesResult.rows);
+});
+
 // Get pharmacy by ID
 app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
   const result = await query('SELECT * FROM "pharmacyInfo" WHERE id = $1', [
@@ -673,7 +703,15 @@ app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
 
 // Update pharmacy by ID
 app.put("/api/pharmacy", authMiddleware, async (req, res) => {
-  const { name, address, contactNumber, phone, email, pharmacyCode, pharmacyId } = req.body;
+  const {
+    name,
+    address,
+    contactNumber,
+    phone,
+    email,
+    pharmacyCode,
+    pharmacyId,
+  } = req.body;
   const now = new Date().toISOString();
   const fields = [];
   if (name) fields.push(`name = '${name}'`);
@@ -683,22 +721,15 @@ app.put("/api/pharmacy", authMiddleware, async (req, res) => {
   if (email) fields.push(`email = '${email}'`);
   if (pharmacyCode) fields.push(`pharmacyCode = '${pharmacyCode}'`);
   fields.push(`"updatedAt" = '${now}'`);
-  await query(
-    `UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $1`,
-    [pharmacyId],
-  );
+  await query(`UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $1`, [
+    pharmacyId,
+  ]);
   res.json({ success: true });
 });
 
 // Staff registration
 app.post("/api/staff", authMiddleware, async (req, res) => {
-  const {
-    userName,
-    role,
-    contactNumber,
-    pin,
-    pharmacyId,
-  } = req.body;
+  const { userName, role, contactNumber, pin, pharmacyId } = req.body;
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -874,7 +905,7 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
     const { key: licenseKey, productCode: storedProductCode } =
       generateLicenseKey(productCode);
 
-      const id = uuid.v4();
+    const id = uuid.v4();
 
     await pool.query(
       `INSERT INTO licenses 
@@ -1050,9 +1081,10 @@ app.post("/api/licenses/revoke", requireApiKey, async (req, res) => {
 app.get("/api/user/licenses", authMiddleware, async (req, res) => {
   try {
     const { id } = req.user;
-    const result = await pool.query(`SELECT * FROM licenses WHERE "userId" = $1`, [
-      id,
-    ]);
+    const result = await pool.query(
+      `SELECT * FROM licenses WHERE "userId" = $1`,
+      [id],
+    );
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "No licenses found" });
     }
