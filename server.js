@@ -1095,6 +1095,31 @@ app.get("/api/user/licenses", authMiddleware, async (req, res) => {
   }
 });
 
+// ===================== EXPENSES =====================
+app.get("/api/expenses/:pharmacyId", authMiddleware, async (req, res) => {
+  const { rows } = await query(
+    `SELECT * FROM expenses WHERE "pharmacyId" = $1 ORDER BY "createdAt" DESC`,
+    [req.params.pharmacyId],
+  );
+  res.json(rows);
+});
+
+app.post("/api/expenses", authMiddleware, async (req, res) => {
+  const { description, amount, pharmacyId, notes, category, date } = req.body;
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await query(
+    'INSERT INTO expenses (id, description, amount, notes, category, date, "pharmacyId", "createdAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',
+    [id, description, amount, notes, category, date, pharmacyId, now],
+  );
+  res.json({ id, description, amount, notes, category, date, pharmacyId, createdAt: now });
+});
+
+app.delete("/api/expenses/:id", authMiddleware, async (req, res) => {
+  await query("DELETE FROM expenses WHERE id = $1", [req.params.id]);
+  res.json({ success: true });
+});
+
 // ===================== 404 =====================
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });

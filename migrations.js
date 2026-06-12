@@ -482,6 +482,23 @@ async function runMigrations(client) {
     `);
       },
     },
+    {
+      name: "027_add_expenses_table",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS expenses (
+            id UUID PRIMARY KEY,
+            amount DECIMAL(10,2) NOT NULL,
+            description TEXT NOT NULL,
+            notes TEXT,
+            category TEXT,
+            date TIMESTAMP NOT NULL,
+            "pharmacyId" UUID REFERENCES pharmacyInfo(id) ON DELETE SET NULL,
+            "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
+          );
+        `);
+      }
+    }
   ];
 
   for (const migration of migrations) {
