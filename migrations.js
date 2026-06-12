@@ -493,7 +493,7 @@ async function runMigrations(client) {
             notes TEXT,
             category TEXT,
             date TIMESTAMP NOT NULL,
-            "pharmacyId" UUID REFERENCES pharmacyInfo(id) ON DELETE SET NULL,
+            "pharmacyId" UUID REFERENCES "pharmacyInfo"(id) ON DELETE SET NULL,
             "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
           );
         `);
