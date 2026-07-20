@@ -673,7 +673,7 @@ app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
   );
 
   if (staffResult.rows.length === 0) {
-    return res.status(404).json({ error: "Staff not found" });
+    return res.json([]);
   }
 
   const pharmacyIds = staffResult.rows[0].pharmacyIds || [];
