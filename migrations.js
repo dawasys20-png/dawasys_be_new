@@ -497,8 +497,71 @@ async function runMigrations(client) {
             "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
           );
         `);
-      }
-    }
+      },
+    },
+    {
+      name: "028_add_sync_columns_for_since_based_pull",
+      up: async (client) => {
+        // medicines already has isDeleted, but sync needs a timestamped
+        // deletedAt to know WHEN a delete happened (for since-filtering) and
+        // to match the local client's deletedAt-based delete signal.
+        await client.query(`
+      ALTER TABLE medicines ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+    `);
+
+        // transactions/transactionItems never got updatedAt at all — needed
+        // for since-filtering even though transactions are append-only
+        // (a correction/void still needs a deletedAt + updatedAt to propagate).
+        await client.query(`
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP;
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+      UPDATE transactions SET "updatedAt" = "createdAt" WHERE "updatedAt" IS NULL;
+    `);
+        await client.query(`
+      ALTER TABLE "transactionItems" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP;
+      ALTER TABLE "transactionItems" ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+    `);
+
+        // expenses: add updatedAt/deletedAt, switch future deletes to soft.
+        await client.query(`
+      ALTER TABLE expenses ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP;
+      ALTER TABLE expenses ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+      UPDATE expenses SET "updatedAt" = "createdAt" WHERE "updatedAt" IS NULL;
+    `);
+
+        // staff: add deletedAt, switch future deletes to soft (was a hard
+        // DELETE — a since-based pull can never detect a row that's simply
+        // gone, so other terminals would never learn a staff member was removed).
+        await client.query(`
+      ALTER TABLE staff ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+    `);
+
+        // pharmacyInfo already has updatedAt from 015; add deletedAt for parity.
+        await client.query(`
+      ALTER TABLE "pharmacyInfo" ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+    `);
+
+        // inventory_movements is now a first-class synced entity (client
+        // quantity is derived from this log). It was missing pharmacyId
+        // entirely (needed to scope pulls per-pharmacy) and updatedAt/deletedAt.
+        await client.query(`
+      ALTER TABLE "inventory_movements" ADD COLUMN IF NOT EXISTS "pharmacyId" UUID;
+      ALTER TABLE "inventory_movements" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP;
+      ALTER TABLE "inventory_movements" ADD COLUMN IF NOT EXISTS "deletedAt" TIMESTAMP;
+      UPDATE "inventory_movements" SET "updatedAt" = "createdAt" WHERE "updatedAt" IS NULL;
+      CREATE INDEX IF NOT EXISTS "idx_inventory_movements_pharmacyId" ON "inventory_movements"("pharmacyId");
+    `);
+
+        // Indexes that make since-filtered pulls fast instead of full scans.
+        await client.query(`
+      CREATE INDEX IF NOT EXISTS "idx_medicines_updatedAt" ON medicines("updatedAt");
+      CREATE INDEX IF NOT EXISTS "idx_transactions_updatedAt" ON transactions("updatedAt");
+      CREATE INDEX IF NOT EXISTS "idx_staff_updatedAt" ON staff("updatedAt");
+      CREATE INDEX IF NOT EXISTS "idx_expenses_updatedAt" ON expenses("updatedAt");
+      CREATE INDEX IF NOT EXISTS "idx_pharmacyInfo_updatedAt" ON "pharmacyInfo"("updatedAt");
+    `);
+      },
+    },
   ];
 
   for (const migration of migrations) {
