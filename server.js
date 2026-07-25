@@ -142,6 +142,18 @@ function sinceOrEpoch(since) {
   return since || "1970-01-01T00:00:00.000Z";
 }
 
+
+async function recomputeRemoteMedicineQuantity(medicineId) {
+  const now = new Date().toISOString();
+  await query(
+    `UPDATE medicines SET quantity = (
+       SELECT COALESCE(SUM(quantity), 0) FROM "inventory_movements"
+       WHERE "medicineId" = $1 AND "deletedAt" IS NULL
+     ), "updatedAt" = $2 WHERE id = $1`,
+    [medicineId, now],
+  );
+}
+
 // Central authorization lookup: which pharmacies can this authenticated
 // user actually see. Used to scope every syncable-entity GET route instead
 // of trusting a client-supplied pharmacyId (or, when none is supplied,
@@ -179,7 +191,7 @@ app.post("/api/login", limiter, async (req, res) => {
   if (!bcrypt.compareSync(password, user.password))
     return res.status(401).json({ error: "Invalid credentials" });
 
-  const token = jwt.sign(user, process.env.JWT_SECRET || "secret", { expiresIn: "8h" });
+  const token = jwt.sign(user, process.env.JWT_SECRET || "secret");
   res.json({ token, user });
 });
 
@@ -210,7 +222,7 @@ app.post("/api/login-staff", limiter, async (req, res) => {
     const staffPayload = { ...staff, username: staff.userName };
     delete staffPayload.userName;
 
-    const token = jwt.sign(staffPayload, process.env.JWT_SECRET || "secret", { expiresIn: "8h" });
+    const token = jwt.sign(staffPayload, process.env.JWT_SECRET || "secret");
     res.json({ token, staff, pharmacy });
   } catch (error) {
     console.error("Login staff error:", error);
@@ -549,6 +561,9 @@ app.post("/api/inventory-movements", authMiddleware, async (req, res) => {
      ON CONFLICT (id) DO NOTHING`,
     [movementId, medicineId, quantity, unitType, movementType, pharmacyId || null, now],
   );
+
+  await recomputeRemoteMedicineQuantity(medicineId);
+
   res.json({ id: movementId, medicineId, quantity, unitType, movementType, pharmacyId, createdAt: now, updatedAt: now });
 });
 

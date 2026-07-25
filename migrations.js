@@ -562,6 +562,31 @@ async function runMigrations(client) {
     `);
       },
     },
+    {
+      name: "028_add_pharmacy_dispenser_role",
+      up: async (client) => {
+        // Drop the existing CHECK constraint
+        await client.query(`
+      ALTER TABLE staff
+      DROP CONSTRAINT IF EXISTS staff_role_check;
+    `);
+
+        // Add the updated CHECK constraint
+        await client.query(`
+      ALTER TABLE staff
+      ADD CONSTRAINT staff_role_check
+      CHECK (
+        role IN (
+          'admin',
+          'pharmacist',
+          'cashier',
+          'technician',
+          'pharmacy_dispenser'
+        )
+      );
+    `);
+      },
+    },
   ];
 
   for (const migration of migrations) {
