@@ -38,6 +38,10 @@ const {
   getSetting,
   getInventoryMovementsByMedicineId,
   getUserByUsername,
+  getUserByEmail,
+  rotateRefreshToken,
+  issueTokenPair,
+  hashToken,
 } = require("./lib/dbFunc");
 const uuid = require("uuid");
 const axios = require("axios");
@@ -191,8 +195,8 @@ app.post("/api/login", limiter, async (req, res) => {
   if (!bcrypt.compareSync(password, user.password))
     return res.status(401).json({ error: "Invalid credentials" });
 
-  const token = jwt.sign(user, process.env.JWT_SECRET || "secret");
-  res.json({ token, user });
+  const { accessToken, refreshToken } = await issueTokenPair(user, user.id, "user");
+  res.json({ token: accessToken, refreshToken, user });
 });
 
 app.post("/api/login-staff", limiter, async (req, res) => {
@@ -222,8 +226,8 @@ app.post("/api/login-staff", limiter, async (req, res) => {
     const staffPayload = { ...staff, username: staff.userName };
     delete staffPayload.userName;
 
-    const token = jwt.sign(staffPayload, process.env.JWT_SECRET || "secret");
-    res.json({ token, staff, pharmacy });
+    const { accessToken, refreshToken } = await issueTokenPair(staffPayload, staff.id, "staff");
+    res.json({ token: accessToken, refreshToken, staff, pharmacy });
   } catch (error) {
     console.error("Login staff error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -233,6 +237,7 @@ app.post("/api/login-staff", limiter, async (req, res) => {
 app.post("/api/register", limiter, async (req, res) => {
   const { username, password, phone, email } = req.body;
   if (await getUserByUsername(username)) return res.status(400).json({ error: "Username already exists" });
+  if (await getUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
@@ -335,6 +340,51 @@ app.post("/api/auth/reset-password", async (req, res) => {
     res.json({ message: "Password reset successful" });
   } catch (err) {
     console.error("Reset password error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/auth/refresh-token", limiter, async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
+
+    const record = await rotateRefreshToken(refreshToken);
+    if (!record) return res.status(401).json({ error: "Invalid or expired refresh token" });
+
+    let payload;
+    if (record.subjecttype === "staff") {
+      const { rows } = await query('SELECT * FROM staff WHERE id = $1 AND "deletedAt" IS NULL', [record.subjectId]);
+      const staff = rows[0];
+      if (!staff) return res.status(401).json({ error: "Staff no longer exists" });
+      payload = { ...staff, username: staff.userName };
+      delete payload.userName;
+    } else {
+      const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [record.subjectId]);
+      payload = rows[0];
+      if (!payload) return res.status(401).json({ error: "User no longer exists" });
+    }
+
+    const { accessToken, refreshToken: newRefreshToken } = await issueTokenPair(
+      payload,
+      record.subjectId,
+      record.subjectType,
+    );
+    res.json({ token: accessToken, refreshToken: newRefreshToken });
+  } catch (err) {
+    console.error("Refresh token error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/auth/logout", async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
+    await query(`UPDATE refresh_tokens SET "revokedAt" = now() WHERE "tokenHash" = $1`, [hashToken(refreshToken)]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Logout error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -673,13 +723,19 @@ app.get("/api/pharmacies", authMiddleware, async (req, res) => {
 });
 
 app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
-  const staffResult = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [req.user.id]);
-  if (staffResult.rows.length === 0) return res.json([]);
+  const staffResult = await query(
+    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+    [req.user.id]
+  );
+  const staffPharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
 
-  const pharmacyIds = staffResult.rows[0].pharmacyIds || [];
-  if (pharmacyIds.length === 0) return res.json([]);
+  const pharmaciesResult = await query(
+    `SELECT * FROM "pharmacyInfo"
+     WHERE ("userId" = $1 OR id = ANY($2::uuid[]))
+       AND "deletedAt" IS NULL`,
+    [req.user.id, staffPharmacyIds]
+  );
 
-  const pharmaciesResult = await query('SELECT * FROM "pharmacyInfo" WHERE id = ANY($1::uuid[])', [pharmacyIds]);
   res.json(pharmaciesResult.rows);
 });
 
@@ -1053,13 +1109,43 @@ app.delete("/api/expenses/:id", authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+
+// ==================== demo ==================
+
+app.get("/api/demo", async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM demo_pharmacies`);
+    res.json(rows);
+  } catch (err) {
+    console.error("Get demo error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/demo-booking", async (req, res) => {
+  const {name, phone, pharmacy, preferredDate, preferredTime, email} = req.body
+
+  try {
+    await query(`INSERT INTO demo_pharmacies (name, phone, pharmacy, preferredDate, preferredTime, email) VALUES ($1, $2, $3, $4, $5, $6)`, [name, phone, pharmacy, preferredDate, preferredTime, email]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Add demo error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+ 
+})
+
 // ===================== 404 =====================
 app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`✅ Server running on:`);
-  console.log(`   Local:   http://localhost:${PORT}`);
+
+// connect to database and start server
+pool.connect().then(() => {
+  app.listen(PORT, () => {
+    console.log(`✅ Server running on:`);
+    console.log(`   Local:   http://localhost:${PORT}`);
+  });
 });

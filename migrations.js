@@ -563,7 +563,7 @@ async function runMigrations(client) {
       },
     },
     {
-      name: "028_add_pharmacy_dispenser_role",
+      name: "029_add_pharmacy_dispenser_role",
       up: async (client) => {
         // Drop the existing CHECK constraint
         await client.query(`
@@ -587,6 +587,68 @@ async function runMigrations(client) {
     `);
       },
     },
+    {
+      name: "030_add_refresh_tokens_table",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS refresh_tokens (
+            id UUID PRIMARY KEY,
+            "tokenHash" TEXT NOT NULL UNIQUE,
+            "subjectId" UUID NOT NULL,
+            "subjectType" TEXT NOT NULL CHECK ("subjectType" IN ('user', 'staff')),
+            "expiresAt" TIMESTAMP NOT NULL,
+            "revokedAt" TIMESTAMP,
+            "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
+          );
+        `);
+
+        // Lookup by hash on every refresh call — needs to be fast.
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS idx_refresh_tokens_tokenHash ON refresh_tokens("tokenHash");
+        `);
+
+        // Lookup by subject for "revoke all sessions for this user/staff"
+        // (e.g. on password change, or an admin force-logout action).
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS idx_refresh_tokens_subject ON refresh_tokens("subjectId", "subjectType");
+        `);
+      },
+    },
+    {
+      // add demo tables
+      name: "031_add_demo_tables",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS demo_pharmacies (
+            id UUID PRIMARY KEY,
+            "name" TEXT NOT NULL,
+            "email" TEXT NOT NULL,
+            "phone" TEXT NOT NULL,
+            "preferredDate" DATE NOT NULL,
+            "preferredTime" TIME NOT NULL,
+            "message" TEXT,
+            "status" TEXT NOT NULL,
+            "createdAt" TIMESTAMP NOT NULL DEFAULT NOW(),
+            "updatedAt" TIMESTAMP NOT NULL DEFAULT NOW()
+          );
+        `);
+      },
+    },
+    // add pharmacy to demo_pharmacies, and make status have default value pending
+    {
+      name: "032_add_pharmacy_to_demo_pharmacies",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE demo_pharmacies
+          ADD COLUMN IF NOT EXISTS "pharmacy" TEXT NOT NULL;
+        `);
+        await client.query(`
+          ALTER TABLE demo_pharmacies
+          ALTER COLUMN "status" SET DEFAULT 'pending';
+        `);
+      },
+    }
+
   ];
 
   for (const migration of migrations) {

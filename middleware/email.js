@@ -20,7 +20,7 @@ const emailTransporter = nodemailer.createTransport({
 
 async function sendResetPasswordEmail(email, resetToken) {
   const appUrl = process.env.APP_URL || "http://localhost:3000";
-  const resetUrl = `${appUrl}/reset-password?token=${resetToken}&email=${email}`;
+  const resetUrl = `${appUrl}/auth/reset-password?token=${resetToken}&email=${email}`;
 
   const mailOptions = {
     from: process.env.SMTP_FROM || "noreply@yourapp.com",
