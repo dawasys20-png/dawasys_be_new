@@ -903,8 +903,8 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
     if (pharmacyIds.length === 0) return res.json([]);
 
     const { rows } = await query(
-      `SELECT * FROM "pharmacyInfo" WHERE id = ANY($1::uuid[]) AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
-      [pharmacyIds, sinceOrEpoch(since)],
+      `SELECT * FROM "pharmacyInfo" WHERE ("userId" = $1 OR id = ANY($2::uuid[])) AND "updatedAt" > $3 ORDER BY "updatedAt" ASC`,
+      [req.user.id, pharmacyIds, sinceOrEpoch(since)],
     );
     return res.json(rows);
   }
