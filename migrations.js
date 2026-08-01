@@ -647,8 +647,67 @@ async function runMigrations(client) {
           ALTER COLUMN "status" SET DEFAULT 'pending';
         `);
       },
-    }
-
+    },
+    {
+      name: "033_add_contact_form_table",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS contact_form (
+            id UUID PRIMARY KEY,
+            "name" TEXT NOT NULL,
+            "email" TEXT NOT NULL,
+            "message" TEXT NOT NULL,
+            "subject" TEXT NOT NULL,
+            "phone" TEXT NOT NULL,
+            "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
+          );
+        `);
+      },
+    },
+    {
+      name: "034_add_trial_table",
+      up: async (client) => {
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS trial (
+            id UUID PRIMARY KEY,
+            "pharmacyName" TEXT NOT NULL,
+            "email" TEXT NOT NULL,
+            "phone" TEXT NOT NULL,
+            "ownerName" TEXT NOT NULL,
+            "location" TEXT NOT NULL,
+            "message" TEXT NOT NULL,
+            "createdAt" TIMESTAMP NOT NULL DEFAULT NOW()
+          );
+        `);
+      },
+    },
+    {
+      name: "035_add_createdAt_to_licenses",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE licenses
+          ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP NOT NULL DEFAULT NOW();
+        `);
+      },
+    },
+    // add status to demo_pharmacies,trial, contact_form and make status have default value pending
+    {
+      name: "036_add_status_to_demo_pharmacies",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE demo_pharmacies
+          ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'pending';
+        `);
+        await client.query(`
+          ALTER TABLE trial
+          ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'pending';
+        `);
+        await client.query(`
+          ALTER TABLE contact_form
+          ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'pending';
+        `);
+      },
+    },
   ];
 
   for (const migration of migrations) {

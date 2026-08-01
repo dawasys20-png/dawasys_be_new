@@ -146,7 +146,6 @@ function sinceOrEpoch(since) {
   return since || "1970-01-01T00:00:00.000Z";
 }
 
-
 async function recomputeRemoteMedicineQuantity(medicineId) {
   const now = new Date().toISOString();
   await query(
@@ -163,7 +162,9 @@ async function recomputeRemoteMedicineQuantity(medicineId) {
 // of trusting a client-supplied pharmacyId (or, when none is supplied,
 // silently returning data for every pharmacy in the system).
 async function getAccessiblePharmacyIds(userId) {
-  const result = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [userId]);
+  const result = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [
+    userId,
+  ]);
   return result.rows[0]?.pharmacyIds || [];
 }
 
@@ -171,6 +172,14 @@ const activateSchema = Joi.object({
   licenseKey: Joi.string().required(),
   machineId: Joi.string().required(),
 });
+
+// Admin check middleware
+function adminCheck(req, res, next) {
+  if (req.user.role !== "admin") {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+  next();
+}
 
 // --------------------------
 // Express API
@@ -195,7 +204,11 @@ app.post("/api/login", limiter, async (req, res) => {
   if (!bcrypt.compareSync(password, user.password))
     return res.status(401).json({ error: "Invalid credentials" });
 
-  const { accessToken, refreshToken } = await issueTokenPair(user, user.id, "user");
+  const { accessToken, refreshToken } = await issueTokenPair(
+    user,
+    user.id,
+    "user",
+  );
   res.json({ token: accessToken, refreshToken, user });
 });
 
@@ -217,16 +230,25 @@ app.post("/api/login-staff", limiter, async (req, res) => {
 
     const staff = staffResult.rows[0];
     if (!staff) return res.status(401).json({ error: "Invalid credentials" });
-    if (!password || !staff.pin) return res.status(400).json({ error: "Missing password or stored PIN" });
-    if (!bcrypt.compareSync(password, staff.pin)) return res.status(401).json({ error: "Invalid credentials" });
+    if (!password || !staff.pin)
+      return res.status(400).json({ error: "Missing password or stored PIN" });
+    if (!bcrypt.compareSync(password, staff.pin))
+      return res.status(401).json({ error: "Invalid credentials" });
 
-    const pharmacyResult = await query(`SELECT * FROM "pharmacyInfo" WHERE "pharmacyCode" = $1`, [pharmacyCode]);
+    const pharmacyResult = await query(
+      `SELECT * FROM "pharmacyInfo" WHERE "pharmacyCode" = $1`,
+      [pharmacyCode],
+    );
     const pharmacy = pharmacyResult.rows[0];
 
     const staffPayload = { ...staff, username: staff.userName };
     delete staffPayload.userName;
 
-    const { accessToken, refreshToken } = await issueTokenPair(staffPayload, staff.id, "staff");
+    const { accessToken, refreshToken } = await issueTokenPair(
+      staffPayload,
+      staff.id,
+      "staff",
+    );
     res.json({ token: accessToken, refreshToken, staff, pharmacy });
   } catch (error) {
     console.error("Login staff error:", error);
@@ -236,8 +258,10 @@ app.post("/api/login-staff", limiter, async (req, res) => {
 
 app.post("/api/register", limiter, async (req, res) => {
   const { username, password, phone, email } = req.body;
-  if (await getUserByUsername(username)) return res.status(400).json({ error: "Username already exists" });
-  if (await getUserByEmail(email)) return res.status(400).json({ error: "Email already exists" });
+  if (await getUserByUsername(username))
+    return res.status(400).json({ error: "Username already exists" });
+  if (await getUserByEmail(email))
+    return res.status(400).json({ error: "Email already exists" });
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
   await query(
@@ -250,15 +274,25 @@ app.post("/api/register", limiter, async (req, res) => {
 app.get("/api/auth/verify", async (req, res) => {
   try {
     const { token } = req.query;
-    if (!token) return res.status(400).json({ error: "Verification token required" });
+    if (!token)
+      return res.status(400).json({ error: "Verification token required" });
 
-    const result = await pool.query(`SELECT * FROM users WHERE "verificationToken" = $1`, [token]);
+    const result = await pool.query(
+      `SELECT * FROM users WHERE "verificationToken" = $1`,
+      [token],
+    );
     const user = result.rows[0];
-    if (!user) return res.status(400).json({ error: "Invalid verification token" });
-    if (user.isverified) return res.status(400).json({ error: "Account already verified" });
-    if (user.verificationexpires && new Date(user.verificationexpires) < new Date())
+    if (!user)
+      return res.status(400).json({ error: "Invalid verification token" });
+    if (user.isverified)
+      return res.status(400).json({ error: "Account already verified" });
+    if (
+      user.verificationexpires &&
+      new Date(user.verificationexpires) < new Date()
+    )
       return res.status(400).json({ error: "Verification token expired" });
-    if (user.verificationtoken !== token) return res.status(400).json({ error: "Invalid verification token" });
+    if (user.verificationtoken !== token)
+      return res.status(400).json({ error: "Invalid verification token" });
 
     await pool.query(
       `UPDATE users SET "isVerified" = true, "verifiedAt" = now(), "verificationToken" = NULL, "verificationExpires" = NULL WHERE id = $1`,
@@ -276,18 +310,29 @@ app.post("/api/auth/resend-verification", async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
-    const result = await pool.query(`SELECT id, email, "isVerified" FROM users WHERE email = $1`, [email.toLowerCase()]);
+    const result = await pool.query(
+      `SELECT id, email, "isVerified" FROM users WHERE email = $1`,
+      [email.toLowerCase()],
+    );
     const user = result.rows[0];
-    if (!user) return res.json({ message: "If that email exists, a verification link has been sent" });
-    if (user.isverified) return res.status(400).json({ error: "Account already verified" });
+    if (!user)
+      return res.json({
+        message: "If that email exists, a verification link has been sent",
+      });
+    if (user.isverified)
+      return res.status(400).json({ error: "Account already verified" });
 
     const verificationToken = crypto.randomBytes(32).toString("hex");
     const verificationExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
-    await pool.query(`UPDATE users SET "verificationToken" = $1, "verificationExpires" = $2 WHERE id = $3`, [
-      verificationToken, verificationExpires, user.id,
-    ]);
+    await pool.query(
+      `UPDATE users SET "verificationToken" = $1, "verificationExpires" = $2 WHERE id = $3`,
+      [verificationToken, verificationExpires, user.id],
+    );
     await sendVerificationEmail(email.toLowerCase(), verificationToken);
-    res.json({ message: "If that email exists and is unverified, a verification link has been sent" });
+    res.json({
+      message:
+        "If that email exists and is unverified, a verification link has been sent",
+    });
   } catch (err) {
     console.error("Resend verification error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -299,19 +344,28 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
-    const result = await pool.query("SELECT * FROM users WHERE email = $1", [email.toLowerCase()]);
+    const result = await pool.query("SELECT * FROM users WHERE email = $1", [
+      email.toLowerCase(),
+    ]);
     const user = result.rows[0];
-    if (!user) return res.json({ message: "If that email exists, a password reset link has been sent" });
+    if (!user)
+      return res.json({
+        message: "If that email exists, a password reset link has been sent",
+      });
 
     const resetToken = crypto.randomBytes(32).toString("hex");
     const resetTokenExpires = new Date(Date.now() + 60 * 60 * 1000);
-    await pool.query(`UPDATE users SET "resetToken" = $1, "resetTokenExpires" = $2 WHERE id = $3`, [
-      resetToken, resetTokenExpires, user.id,
-    ]);
+    await pool.query(
+      `UPDATE users SET "resetToken" = $1, "resetTokenExpires" = $2 WHERE id = $3`,
+      [resetToken, resetTokenExpires, user.id],
+    );
 
     const emailSent = await sendResetPasswordEmail(user.email, resetToken);
-    if (!emailSent) return res.status(500).json({ error: "Failed to send reset email" });
-    res.json({ message: "If that email exists, a password reset link has been sent" });
+    if (!emailSent)
+      return res.status(500).json({ error: "Failed to send reset email" });
+    res.json({
+      message: "If that email exists, a password reset link has been sent",
+    });
   } catch (err) {
     console.error("Forgot password error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -322,17 +376,26 @@ app.post("/api/auth/reset-password", async (req, res) => {
   try {
     const { email, token, newPassword } = req.body;
     if (!email || !token || !newPassword)
-      return res.status(400).json({ error: "Email, token, and new password are required" });
-    if (newPassword.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+      return res
+        .status(400)
+        .json({ error: "Email, token, and new password are required" });
+    if (newPassword.length < 6)
+      return res
+        .status(400)
+        .json({ error: "Password must be at least 6 characters" });
 
     const result = await pool.query(
       `SELECT * FROM users WHERE email = $1 AND "resetToken" = $2 AND "resetTokenExpires" > NOW()`,
       [email.toLowerCase(), token],
     );
     const user = result.rows[0];
-    if (!user) return res.status(400).json({ error: "Invalid or expired reset token" });
+    if (!user)
+      return res.status(400).json({ error: "Invalid or expired reset token" });
 
-    const hashedPassword = await bcrypt.hash(newPassword, await bcrypt.genSalt(10));
+    const hashedPassword = await bcrypt.hash(
+      newPassword,
+      await bcrypt.genSalt(10),
+    );
     await pool.query(
       `UPDATE users SET password = $1, "passwordChangedAt" = NOW(), "resetToken" = NULL, "resetTokenExpires" = NULL WHERE id = $2`,
       [hashedPassword, user.id],
@@ -347,22 +410,33 @@ app.post("/api/auth/reset-password", async (req, res) => {
 app.post("/api/auth/refresh-token", limiter, async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
+    if (!refreshToken)
+      return res.status(400).json({ error: "Refresh token required" });
 
     const record = await rotateRefreshToken(refreshToken);
-    if (!record) return res.status(401).json({ error: "Invalid or expired refresh token" });
+    if (!record)
+      return res
+        .status(401)
+        .json({ error: "Invalid or expired refresh token" });
 
     let payload;
     if (record.subjecttype === "staff") {
-      const { rows } = await query('SELECT * FROM staff WHERE id = $1 AND "deletedAt" IS NULL', [record.subjectId]);
+      const { rows } = await query(
+        'SELECT * FROM staff WHERE id = $1 AND "deletedAt" IS NULL',
+        [record.subjectId],
+      );
       const staff = rows[0];
-      if (!staff) return res.status(401).json({ error: "Staff no longer exists" });
+      if (!staff)
+        return res.status(401).json({ error: "Staff no longer exists" });
       payload = { ...staff, username: staff.userName };
       delete payload.userName;
     } else {
-      const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [record.subjectId]);
+      const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [
+        record.subjectId,
+      ]);
       payload = rows[0];
-      if (!payload) return res.status(401).json({ error: "User no longer exists" });
+      if (!payload)
+        return res.status(401).json({ error: "User no longer exists" });
     }
 
     const { accessToken, refreshToken: newRefreshToken } = await issueTokenPair(
@@ -380,8 +454,12 @@ app.post("/api/auth/refresh-token", limiter, async (req, res) => {
 app.post("/api/auth/logout", async (req, res) => {
   try {
     const { refreshToken } = req.body;
-    if (!refreshToken) return res.status(400).json({ error: "Refresh token required" });
-    await query(`UPDATE refresh_tokens SET "revokedAt" = now() WHERE "tokenHash" = $1`, [hashToken(refreshToken)]);
+    if (!refreshToken)
+      return res.status(400).json({ error: "Refresh token required" });
+    await query(
+      `UPDATE refresh_tokens SET "revokedAt" = now() WHERE "tokenHash" = $1`,
+      [hashToken(refreshToken)],
+    );
     res.json({ success: true });
   } catch (err) {
     console.error("Logout error:", err);
@@ -448,12 +526,30 @@ app.post("/api/medicines", authMiddleware, async (req, res) => {
       ON CONFLICT (id) DO NOTHING
       RETURNING *`,
       [
-        id, m.name, m.unitType, m.quantity || 0, m.boxes || null, m.stripsPerBox || null,
-        m.unitsPerStrip || null, m.bottles || null, m.mlPerBottle || null, m.price,
-        m.lowStockThreshold, m.restockThreshold, m.expiryDate, m.supplier || null,
-        m.batchNumber || null, m.unitBuyingPrice || 0, 0, m.wholesaleStripPrice || 0,
-        m.wholesaleBoxPrice || 0, m.createdAt || now, m.updatedAt || now,
-        m.buyingPrice || 0, m.sellingPrice || 0, m.pharmacyId || null,
+        id,
+        m.name,
+        m.unitType,
+        m.quantity || 0,
+        m.boxes || null,
+        m.stripsPerBox || null,
+        m.unitsPerStrip || null,
+        m.bottles || null,
+        m.mlPerBottle || null,
+        m.price,
+        m.lowStockThreshold,
+        m.restockThreshold,
+        m.expiryDate,
+        m.supplier || null,
+        m.batchNumber || null,
+        m.unitBuyingPrice || 0,
+        0,
+        m.wholesaleStripPrice || 0,
+        m.wholesaleBoxPrice || 0,
+        m.createdAt || now,
+        m.updatedAt || now,
+        m.buyingPrice || 0,
+        m.sellingPrice || 0,
+        m.pharmacyId || null,
       ],
     );
     res.json(rows[0] || { ...m, id });
@@ -485,7 +581,10 @@ app.put("/api/medicines/:id", authMiddleware, async (req, res) => {
 
 app.delete("/api/medicines/:id", authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
-  await query(`UPDATE medicines SET "isDeleted" = 1, "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`, [now, req.params.id]);
+  await query(
+    `UPDATE medicines SET "isDeleted" = 1, "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
+    [now, req.params.id],
+  );
   res.json({ success: true });
 });
 
@@ -512,7 +611,10 @@ app.get("/api/transactions", authMiddleware, async (req, res) => {
   const { rows: transactions } = await query(sql, params);
   const withItems = await Promise.all(
     transactions.map(async (tx) => {
-      const items = await query(`SELECT * FROM "transactionItems" WHERE "transactionId" = $1`, [tx.id]);
+      const items = await query(
+        `SELECT * FROM "transactionItems" WHERE "transactionId" = $1`,
+        [tx.id],
+      );
       return { ...tx, items: items.rows };
     }),
   );
@@ -533,9 +635,19 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
       ON CONFLICT (id) DO NOTHING
       RETURNING *`,
       [
-        id, tx.totalAmount, tx.paymentMethod, tx.date || now, tx.notes || null, tx.createdAt || now,
-        tx.updatedAt || now, tx.profit, tx.transactionType, tx.packType || null,
-        tx.pharmacyId || null, tx.cashierId || null, tx.billTotal ?? tx.totalAmount,
+        id,
+        tx.totalAmount,
+        tx.paymentMethod,
+        tx.date || now,
+        tx.notes || null,
+        tx.createdAt || now,
+        tx.updatedAt || now,
+        tx.profit,
+        tx.transactionType,
+        tx.packType || null,
+        tx.pharmacyId || null,
+        tx.cashierId || null,
+        tx.billTotal ?? tx.totalAmount,
       ],
     );
 
@@ -552,9 +664,18 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           ON CONFLICT (id) DO NOTHING`,
           [
-            itemId, id, item.medicineId, item.medicineName, item.unitType, item.quantity,
-            item.dosageInstructions || null, item.unitPrice, item.subtotal, item.stockQuantity,
-            tx.pharmacyId || null, now,
+            itemId,
+            id,
+            item.medicineId,
+            item.medicineName,
+            item.unitType,
+            item.quantity,
+            item.dosageInstructions || null,
+            item.unitPrice,
+            item.subtotal,
+            item.stockQuantity,
+            tx.pharmacyId || null,
+            now,
           ],
         );
       }
@@ -575,13 +696,22 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
 
 app.delete("/api/transactions/:id", authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
-  await query(`UPDATE transactions SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`, [now, req.params.id]);
-  await query(`UPDATE "transactionItems" SET "deletedAt" = $1, "updatedAt" = $1 WHERE "transactionId" = $2`, [now, req.params.id]);
+  await query(
+    `UPDATE transactions SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
+    [now, req.params.id],
+  );
+  await query(
+    `UPDATE "transactionItems" SET "deletedAt" = $1, "updatedAt" = $1 WHERE "transactionId" = $2`,
+    [now, req.params.id],
+  );
   res.json({ success: true });
 });
 
-app.get("/api/transactions/cashier/:cashierId", authMiddleware, async (req, res) =>
-  res.json(await getTransactionsByCashierId(req.params.cashierId)),
+app.get(
+  "/api/transactions/cashier/:cashierId",
+  authMiddleware,
+  async (req, res) =>
+    res.json(await getTransactionsByCashierId(req.params.cashierId)),
 );
 
 // ===================== INVENTORY MOVEMENTS =====================
@@ -602,25 +732,45 @@ app.get("/api/inventory-movements", authMiddleware, async (req, res) => {
 });
 
 app.post("/api/inventory-movements", authMiddleware, async (req, res) => {
-  const { id, medicineId, quantity, unitType, movementType, pharmacyId } = req.body;
+  const { id, medicineId, quantity, unitType, movementType, pharmacyId } =
+    req.body;
   const now = new Date().toISOString();
   const movementId = id || crypto.randomUUID();
   await query(
     `INSERT INTO "inventory_movements" (id, "medicineId", quantity, "unitType", "movementType", "pharmacyId", "createdAt", "updatedAt")
      VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
      ON CONFLICT (id) DO NOTHING`,
-    [movementId, medicineId, quantity, unitType, movementType, pharmacyId || null, now],
+    [
+      movementId,
+      medicineId,
+      quantity,
+      unitType,
+      movementType,
+      pharmacyId || null,
+      now,
+    ],
   );
 
   await recomputeRemoteMedicineQuantity(medicineId);
 
-  res.json({ id: movementId, medicineId, quantity, unitType, movementType, pharmacyId, createdAt: now, updatedAt: now });
+  res.json({
+    id: movementId,
+    medicineId,
+    quantity,
+    unitType,
+    movementType,
+    pharmacyId,
+    createdAt: now,
+    updatedAt: now,
+  });
 });
 
 // Legacy camelCase routes kept for backward compatibility with older
 // clients/web builds that haven't switched to the hyphenated path yet.
 app.get("/api/inventoryMovements", authMiddleware, async (req, res) => {
-  const { rows } = await query(`SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL ORDER BY "createdAt" DESC`);
+  const { rows } = await query(
+    `SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL ORDER BY "createdAt" DESC`,
+  );
   res.json(rows);
 });
 app.post("/api/inventoryMovements", authMiddleware, async (req, res) => {
@@ -629,7 +779,10 @@ app.post("/api/inventoryMovements", authMiddleware, async (req, res) => {
 });
 app.delete("/api/inventoryMovements/:id", authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
-  await query(`UPDATE "inventory_movements" SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`, [now, req.params.id]);
+  await query(
+    `UPDATE "inventory_movements" SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
+    [now, req.params.id],
+  );
   res.json({ success: true });
 });
 app.get("/api/inventoryMovements/:medicineId", async (req, res) =>
@@ -637,11 +790,17 @@ app.get("/api/inventoryMovements/:medicineId", async (req, res) =>
 );
 
 // ===================== LICENSE =====================
-app.get("/api/license", authMiddleware, async (req, res) => res.json((await getLicense()) || null));
-app.post("/api/license", authMiddleware, async (req, res) => res.json(await saveLicense(req.body)));
+app.get("/api/license", authMiddleware, async (req, res) =>
+  res.json((await getLicense()) || null),
+);
+app.post("/api/license", authMiddleware, async (req, res) =>
+  res.json(await saveLicense(req.body)),
+);
 
 // ===================== SETTINGS =====================
-app.get("/api/settings/:key", async (req, res) => res.json({ value: await getSetting(req.params.key) }));
+app.get("/api/settings/:key", async (req, res) =>
+  res.json({ value: await getSetting(req.params.key) }),
+);
 app.post("/api/settings", async (req, res) => {
   await saveSetting(req.body.key, req.body.value);
   res.json({ success: true });
@@ -657,10 +816,24 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
   await query(
     'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode") ' +
       "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-    [id, name, address, contactNumber, phone, email, userId, now, now, pharmacyCode],
+    [
+      id,
+      name,
+      address,
+      contactNumber,
+      phone,
+      email,
+      userId,
+      now,
+      now,
+      pharmacyCode,
+    ],
   );
 
-  const result = await query('SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1', [userId]);
+  const result = await query(
+    'SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1',
+    [userId],
+  );
   const pharmacyCount = parseInt(result.rows[0].count, 10);
   let staffId = null;
 
@@ -670,23 +843,45 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
     await query(
       'INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyIds", "createdAt", "updatedAt") ' +
         "VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)",
-      [req.user.id, req.user.username, "admin", contactNumber || null, hashedPin, JSON.stringify([id]), now, now],
+      [
+        req.user.id,
+        req.user.username,
+        "admin",
+        contactNumber || null,
+        hashedPin,
+        JSON.stringify([id]),
+        now,
+        now,
+      ],
     );
   } else {
-    const staff = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [req.user.id]);
+    const staff = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [
+      req.user.id,
+    ]);
     if (staff.rows.length > 0) {
       const pharmacyIds = staff.rows[0].pharmacyIds || [];
       if (!pharmacyIds.includes(id)) {
         pharmacyIds.push(id);
-        await query('UPDATE staff SET "pharmacyIds" = $1::jsonb, "updatedAt" = $2 WHERE id = $3', [
-          JSON.stringify(pharmacyIds), now, req.user.id,
-        ]);
+        await query(
+          'UPDATE staff SET "pharmacyIds" = $1::jsonb, "updatedAt" = $2 WHERE id = $3',
+          [JSON.stringify(pharmacyIds), now, req.user.id],
+        );
       }
     }
   }
 
   res.json({
-    data: { id, name, address, contactNumber, phone, email, pharmacyCode, createdAt: now, updatedAt: now },
+    data: {
+      id,
+      name,
+      address,
+      contactNumber,
+      phone,
+      email,
+      pharmacyCode,
+      createdAt: now,
+      updatedAt: now,
+    },
     staffId,
   });
 });
@@ -700,7 +895,10 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
   const { since } = req.query;
 
   if (since !== undefined) {
-    const staffResult = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [req.user.id]);
+    const staffResult = await query(
+      'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+      [req.user.id],
+    );
     const pharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
     if (pharmacyIds.length === 0) return res.json([]);
 
@@ -711,7 +909,10 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
     return res.json(rows);
   }
 
-  const result = await query('SELECT * FROM "pharmacyInfo" WHERE "userId" = $1 ORDER BY "createdAt" DESC', [req.user.id]);
+  const result = await query(
+    'SELECT * FROM "pharmacyInfo" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
+    [req.user.id],
+  );
   const pharmacy = result.rows[0];
   if (!pharmacy) return res.status(404).json({ error: "Not found" });
   res.json(pharmacy);
@@ -725,7 +926,7 @@ app.get("/api/pharmacies", authMiddleware, async (req, res) => {
 app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
   const staffResult = await query(
     'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-    [req.user.id]
+    [req.user.id],
   );
   const staffPharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
 
@@ -733,14 +934,16 @@ app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
     `SELECT * FROM "pharmacyInfo"
      WHERE ("userId" = $1 OR id = ANY($2::uuid[]))
        AND "deletedAt" IS NULL`,
-    [req.user.id, staffPharmacyIds]
+    [req.user.id, staffPharmacyIds],
   );
 
   res.json(pharmaciesResult.rows);
 });
 
 app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
-  const result = await query('SELECT * FROM "pharmacyInfo" WHERE id = $1', [req.params.id]);
+  const result = await query('SELECT * FROM "pharmacyInfo" WHERE id = $1', [
+    req.params.id,
+  ]);
   const pharmacy = result.rows[0];
   if (!pharmacy) return res.status(404).json({ error: "Not found" });
   res.json(pharmacy);
@@ -757,17 +960,38 @@ async function updatePharmacyFields(id, updates) {
   const values = [];
   let index = 1;
 
-  if (name !== undefined) { fields.push(`name = $${index++}`); values.push(name); }
-  if (address !== undefined) { fields.push(`address = $${index++}`); values.push(address); }
-  if (contactNumber !== undefined) { fields.push(`"contactNumber" = $${index++}`); values.push(contactNumber); }
-  if (phone !== undefined) { fields.push(`phone = $${index++}`); values.push(phone); }
-  if (email !== undefined) { fields.push(`email = $${index++}`); values.push(email); }
-  if (pharmacyCode !== undefined) { fields.push(`"pharmacyCode" = $${index++}`); values.push(pharmacyCode); }
+  if (name !== undefined) {
+    fields.push(`name = $${index++}`);
+    values.push(name);
+  }
+  if (address !== undefined) {
+    fields.push(`address = $${index++}`);
+    values.push(address);
+  }
+  if (contactNumber !== undefined) {
+    fields.push(`"contactNumber" = $${index++}`);
+    values.push(contactNumber);
+  }
+  if (phone !== undefined) {
+    fields.push(`phone = $${index++}`);
+    values.push(phone);
+  }
+  if (email !== undefined) {
+    fields.push(`email = $${index++}`);
+    values.push(email);
+  }
+  if (pharmacyCode !== undefined) {
+    fields.push(`"pharmacyCode" = $${index++}`);
+    values.push(pharmacyCode);
+  }
   fields.push(`"updatedAt" = $${index++}`);
   values.push(now);
   values.push(id);
 
-  await query(`UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $${index}`, values);
+  await query(
+    `UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $${index}`,
+    values,
+  );
 }
 
 // Body-based — kept for the existing web-build caller (data-services.ts's
@@ -800,10 +1024,29 @@ app.post("/api/pharmacy", authMiddleware, async (req, res) => {
     `INSERT INTO "pharmacyInfo" (id, name, address, phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode")
      VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
      ON CONFLICT (id) DO NOTHING`,
-    [pharmacyId, name, address, phone || "", email || "", req.user.id, now, pharmacyCode || null],
+    [
+      pharmacyId,
+      name,
+      address,
+      phone || "",
+      email || "",
+      req.user.id,
+      now,
+      pharmacyCode || null,
+    ],
   );
 
-  res.json({ id: pharmacyId, name, address, phone, email, pharmacyCode, userId: req.user.id, createdAt: now, updatedAt: now });
+  res.json({
+    id: pharmacyId,
+    name,
+    address,
+    phone,
+    email,
+    pharmacyCode,
+    userId: req.user.id,
+    createdAt: now,
+    updatedAt: now,
+  });
 });
 
 // ===================== STAFF =====================
@@ -812,7 +1055,8 @@ function isBcryptHash(value) {
 }
 
 app.post("/api/staff", authMiddleware, async (req, res) => {
-  const { id, userName, role, contactNumber, pin, pharmacyId, pharmacyIds } = req.body;
+  const { id, userName, role, contactNumber, pin, pharmacyId, pharmacyIds } =
+    req.body;
   const staffId = id || crypto.randomUUID();
   const now = new Date().toISOString();
   const resolvedPharmacyIds = pharmacyIds || (pharmacyId ? [pharmacyId] : []);
@@ -827,9 +1071,26 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
     `INSERT INTO staff (id, "userName", role, "contactNumber", pin, "pharmacyIds", "createdAt", "updatedAt")
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8)
      ON CONFLICT (id) DO NOTHING`,
-    [staffId, userName, role, contactNumber, storedPin, JSON.stringify(resolvedPharmacyIds), now, now],
+    [
+      staffId,
+      userName,
+      role,
+      contactNumber,
+      storedPin,
+      JSON.stringify(resolvedPharmacyIds),
+      now,
+      now,
+    ],
   );
-  res.json({ id: staffId, userName, role, contactNumber, pharmacyIds: resolvedPharmacyIds, createdAt: now, updatedAt: now });
+  res.json({
+    id: staffId,
+    userName,
+    role,
+    contactNumber,
+    pharmacyIds: resolvedPharmacyIds,
+    createdAt: now,
+    updatedAt: now,
+  });
 });
 
 // Flat, unscoped-by-path version for the generic sync engine
@@ -839,7 +1100,10 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
 // to already know which pharmacyId to ask about.
 app.get("/api/staff", authMiddleware, async (req, res) => {
   const { since } = req.query;
-  const ownStaffResult = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [req.user.id]);
+  const ownStaffResult = await query(
+    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+    [req.user.id],
+  );
   const pharmacyIds = ownStaffResult.rows[0]?.pharmacyIds || [];
   if (pharmacyIds.length === 0) return res.json([]);
 
@@ -876,15 +1140,21 @@ app.post("/api/staff/verify-pin", authMiddleware, async (req, res) => {
   if (role === "admin") {
     const user = await getUserByUsername(req.user.username);
     if (!user) return res.status(404).json({ error: "User not found" });
-    if (!bcrypt.compareSync(pin, user.password)) return res.status(401).json({ error: "Invalid PIN" });
+    if (!bcrypt.compareSync(pin, user.password))
+      return res.status(401).json({ error: "Invalid PIN" });
     return res.json({ success: true });
   }
 
-  const result = await query("SELECT * FROM staff WHERE id = $1 AND \"deletedAt\" IS NULL", [staffId]);
+  const result = await query(
+    'SELECT * FROM staff WHERE id = $1 AND "deletedAt" IS NULL',
+    [staffId],
+  );
   const staff = result.rows[0];
   if (!staff) return res.status(404).json({ error: "Staff not found" });
-  if (staff.role !== role) return res.status(404).json({ error: "Staff not found" });
-  if (!bcrypt.compareSync(pin, staff.pin)) return res.status(401).json({ error: "Invalid PIN" });
+  if (staff.role !== role)
+    return res.status(404).json({ error: "Staff not found" });
+  if (!bcrypt.compareSync(pin, staff.pin))
+    return res.status(401).json({ error: "Invalid PIN" });
   res.json({ success: true });
 });
 
@@ -895,15 +1165,30 @@ app.put("/api/staff/:id", authMiddleware, async (req, res) => {
   const values = [];
   let index = 1;
 
-  if (userName !== undefined) { fields.push(`"userName" = $${index++}`); values.push(userName); }
-  if (role !== undefined) { fields.push(`role = $${index++}`); values.push(role); }
-  if (contactNumber !== undefined) { fields.push(`"contactNumber" = $${index++}`); values.push(contactNumber); }
-  if (pin !== undefined) { fields.push(`pin = $${index++}`); values.push(pin); }
+  if (userName !== undefined) {
+    fields.push(`"userName" = $${index++}`);
+    values.push(userName);
+  }
+  if (role !== undefined) {
+    fields.push(`role = $${index++}`);
+    values.push(role);
+  }
+  if (contactNumber !== undefined) {
+    fields.push(`"contactNumber" = $${index++}`);
+    values.push(contactNumber);
+  }
+  if (pin !== undefined) {
+    fields.push(`pin = $${index++}`);
+    values.push(pin);
+  }
   fields.push(`"updatedAt" = $${index++}`);
   values.push(now);
   values.push(req.params.id);
 
-  await query(`UPDATE staff SET ${fields.join(", ")} WHERE id = $${index}`, values);
+  await query(
+    `UPDATE staff SET ${fields.join(", ")} WHERE id = $${index}`,
+    values,
+  );
   res.json({ success: true });
 });
 
@@ -917,17 +1202,23 @@ app.delete("/api/staff/:id", authMiddleware, async (req, res) => {
     `UPDATE staff SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2 RETURNING id`,
     [now, req.params.id],
   );
-  if (result.rows.length === 0) return res.status(404).json({ error: "Staff not found" });
+  if (result.rows.length === 0)
+    return res.status(404).json({ error: "Staff not found" });
   res.json({ success: true });
 });
 
 // ===================== USERS (admin) =====================
-app.get("/api/users/emails", authMiddleware, async (req, res) => {
+app.get("/api/users/emails", authMiddleware, adminCheck, async (req, res) => {
   try {
-    if (req.user.role !== "admin") return res.status(403).json({ error: "Admin access required" });
-    const result = await pool.query('SELECT id, email, name, role, "createdAt" FROM users ORDER BY "createdAt" DESC');
+    const result = await pool.query(
+      'SELECT id, email, name, role, "createdAt" FROM users ORDER BY "createdAt" DESC',
+    );
     const emails = result.rows.map((user) => ({
-      id: user.id, email: user.email, name: user.name, role: user.role, createdAt: user.createdat,
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      role: user.role,
+      createdAt: user.createdat,
     }));
     res.json({ users: emails, count: emails.length });
   } catch (err) {
@@ -936,28 +1227,79 @@ app.get("/api/users/emails", authMiddleware, async (req, res) => {
   }
 });
 
+app.get("/api/users", authMiddleware, adminCheck, async (req, res) => {
+  try {
+    // if (req.user.role !== "admin")
+    //   return res.status(403).json({ error: "Admin access required" });
+    const result = await pool.query(
+      'SELECT id, email, username, role, phone, "createdAt" FROM users ORDER BY "createdAt" DESC',
+    );
+    const users = result.rows.map((user) => ({
+      id: user.id,
+      email: user.email,
+      name: user.username,
+      role: user.role,
+      phone: user.phone,
+      createdAt: user.createdat,
+    }));
+    res.json({ users, count: users.length });
+  } catch (err) {
+    console.error("Get users error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+})
+
 // ===================== LICENSES (paid) =====================
 app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
   try {
-    const { plan, maxMachines, expiresAt, phone, amount, productCode } = req.body;
+    const { plan, maxMachines, expiresAt, phone, amount, productCode } =
+      req.body;
     const reference = generateMarzPar();
-    const { key: licenseKey, productCode: storedProductCode } = generateLicenseKey(productCode);
+    const { key: licenseKey, productCode: storedProductCode } =
+      generateLicenseKey(productCode);
     const id = uuid.v4();
 
     await pool.query(
       `INSERT INTO licenses
        (id, licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [id, licenseKey, plan, maxMachines, expiresAt ? new Date(expiresAt) : null, [], "inactive", reference, amount, phone, storedProductCode, req.user.id],
+      [
+        id,
+        licenseKey,
+        plan,
+        maxMachines,
+        expiresAt ? new Date(expiresAt) : null,
+        [],
+        "inactive",
+        reference,
+        amount,
+        phone,
+        storedProductCode,
+        req.user.id,
+      ],
     );
 
     await axios.post(
       `${process.env.MARZ_API_URL}/collect-money`,
-      { amount, phone_number: `${phone}`, country: "UG", reference: `${reference}`, description: "Payment for license", callback_url: process.env.MARZ_API_CALLBACK_URL },
-      { headers: { Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}`, "Content-Type": "application/json" } },
+      {
+        amount,
+        phone_number: `${phone}`,
+        country: "UG",
+        reference: `${reference}`,
+        description: "Payment for license",
+        callback_url: process.env.MARZ_API_CALLBACK_URL,
+      },
+      {
+        headers: {
+          Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}`,
+          "Content-Type": "application/json",
+        },
+      },
     );
 
-    res.status(202).json({ message: "Payment initiated", reference, licenseKey, expiresAt });
+    res
+      .status(202)
+      .json({ message: "Payment initiated", reference, licenseKey, expiresAt });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Internal server error" });
@@ -975,15 +1317,24 @@ app.post("/marz/callback", async (req, res) => {
     const paymentReference = transaction.reference;
     if (!transactionReference) return;
 
-    const verifyRes = await axios.get(`${process.env.MARZ_API_URL}/transactions/${transactionReference}`, {
-      headers: { Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}` },
-    });
+    const verifyRes = await axios.get(
+      `${process.env.MARZ_API_URL}/transactions/${transactionReference}`,
+      {
+        headers: { Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}` },
+      },
+    );
     if (verifyRes.data?.transaction?.status !== "completed") return;
 
-    const existing = await pool.query(`SELECT status FROM licenses WHERE "paymentReference" = $1`, [paymentReference]);
+    const existing = await pool.query(
+      `SELECT status FROM licenses WHERE "paymentReference" = $1`,
+      [paymentReference],
+    );
     if (existing.rows[0]?.status === "paid") return;
 
-    await pool.query(`UPDATE licenses SET status = 'paid', "paymentStatus" = 'completed' WHERE "paymentReference" = $1`, [paymentReference]);
+    await pool.query(
+      `UPDATE licenses SET status = 'paid', "paymentStatus" = 'completed' WHERE "paymentReference" = $1`,
+      [paymentReference],
+    );
     console.log("Payment verified and confirmed:", paymentReference);
   } catch (err) {
     console.error("Callback error:", err);
@@ -996,27 +1347,42 @@ app.post("/api/licenses/activate", limiter, async (req, res) => {
 
   try {
     const { licenseKey, machineId } = req.body;
-    const result = await pool.query("SELECT * FROM licenses WHERE licenseKey = $1", [licenseKey]);
+    const result = await pool.query(
+      "SELECT * FROM licenses WHERE licenseKey = $1",
+      [licenseKey],
+    );
     const license = result.rows[0];
 
     if (!license) return res.status(404).json({ error: "Invalid license key" });
-    if (license.status === "revoked") return res.status(403).json({ error: "License revoked" });
-    if (license.paymentStatus !== "completed") return res.status(402).json({ error: "Payment not completed" });
+    if (license.status === "revoked")
+      return res.status(403).json({ error: "License revoked" });
+    if (license.paymentStatus !== "completed")
+      return res.status(402).json({ error: "Payment not completed" });
 
     let machineIds = license.machineids || [];
     if (!machineIds.includes(machineId)) {
-      if (machineIds.length >= license.maxmachines) return res.status(403).json({ error: "Max machines reached" });
+      if (machineIds.length >= license.maxmachines)
+        return res.status(403).json({ error: "Max machines reached" });
       machineIds = [...machineIds, machineId];
     }
 
-    await pool.query("UPDATE licenses SET machineIds = $1, status = $2 WHERE licenseKey = $3", [machineIds, "active", licenseKey]);
+    await pool.query(
+      "UPDATE licenses SET machineIds = $1, status = $2 WHERE licenseKey = $3",
+      [machineIds, "active", licenseKey],
+    );
 
     const licensePayload = {
-      licenseKey: license.licensekey, plan: license.plan, machineIds: machineId,
-      maxMachines: license.maxmachines, expiresAt: license.expiresat,
+      licenseKey: license.licensekey,
+      plan: license.plan,
+      machineIds: machineId,
+      maxMachines: license.maxmachines,
+      expiresAt: license.expiresat,
     };
     const licenseKeyPrefix = (license.licensekey || "DWF").split("-")[0];
-    const productCode = licenseKeyPrefix === "DENT" || licenseKeyPrefix === "DAWASYS" ? licenseKeyPrefix : license.productcode || "DWF";
+    const productCode =
+      licenseKeyPrefix === "DENT" || licenseKeyPrefix === "DAWASYS"
+        ? licenseKeyPrefix
+        : license.productcode || "DWF";
     const signature = signLicense(licensePayload, productCode);
 
     res.json({ license: licensePayload, signature });
@@ -1029,7 +1395,10 @@ app.post("/api/licenses/activate", limiter, async (req, res) => {
 app.post("/api/licenses/revoke", requireApiKey, async (req, res) => {
   try {
     const { licenseKey } = req.body;
-    await pool.query("UPDATE licenses SET status = $1 WHERE licenseKey = $2", ["revoked", licenseKey]);
+    await pool.query("UPDATE licenses SET status = $1 WHERE licenseKey = $2", [
+      "revoked",
+      licenseKey,
+    ]);
     res.json({ message: "License revoked" });
   } catch (err) {
     res.status(500).json({ error: "Internal server error" });
@@ -1039,8 +1408,12 @@ app.post("/api/licenses/revoke", requireApiKey, async (req, res) => {
 app.get("/api/user/licenses", authMiddleware, async (req, res) => {
   try {
     const { id } = req.user;
-    const result = await pool.query(`SELECT * FROM licenses WHERE "userId" = $1`, [id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: "No licenses found" });
+    const result = await pool.query(
+      `SELECT * FROM licenses WHERE "userId" = $1`,
+      [id],
+    );
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: "No licenses found" });
     res.json(result.rows);
   } catch (err) {
     console.error("Get licenses error:", err);
@@ -1054,7 +1427,10 @@ app.get("/api/user/licenses", authMiddleware, async (req, res) => {
 // id segment, scoped server-side to the user's accessible pharmacies.
 app.get("/api/expenses", authMiddleware, async (req, res) => {
   const { since } = req.query;
-  const ownStaffResult = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [req.user.id]);
+  const ownStaffResult = await query(
+    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+    [req.user.id],
+  );
   const pharmacyIds = ownStaffResult.rows[0]?.pharmacyIds || [];
   if (pharmacyIds.length === 0) return res.json([]);
 
@@ -1084,7 +1460,8 @@ app.get("/api/expenses/:pharmacyId", authMiddleware, async (req, res) => {
 });
 
 app.post("/api/expenses", authMiddleware, async (req, res) => {
-  const { id, description, amount, pharmacyId, notes, category, date } = req.body;
+  const { id, description, amount, pharmacyId, notes, category, date } =
+    req.body;
   const expenseId = id || crypto.randomUUID();
   const now = new Date().toISOString();
   try {
@@ -1092,10 +1469,25 @@ app.post("/api/expenses", authMiddleware, async (req, res) => {
       'INSERT INTO expenses (id, description, amount, notes, category, date, "pharmacyId", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) ON CONFLICT (id) DO NOTHING',
       [expenseId, description, amount, notes, category, date, pharmacyId, now],
     );
-    res.json({ id: expenseId, description, amount, notes, category, date, pharmacyId, createdAt: now, updatedAt: now });
+    res.json({
+      id: expenseId,
+      description,
+      amount,
+      notes,
+      category,
+      date,
+      pharmacyId,
+      createdAt: now,
+      updatedAt: now,
+    });
   } catch (err) {
     if (err.code === "23503") {
-      return res.status(409).json({ error: "PARENT_NOT_SYNCED", message: `Referenced pharmacy (${pharmacyId}) does not exist on this server yet` });
+      return res
+        .status(409)
+        .json({
+          error: "PARENT_NOT_SYNCED",
+          message: `Referenced pharmacy (${pharmacyId}) does not exist on this server yet`,
+        });
     }
     console.error("Add expense error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -1105,10 +1497,12 @@ app.post("/api/expenses", authMiddleware, async (req, res) => {
 // Switched to soft delete — same reasoning as staff above.
 app.delete("/api/expenses/:id", authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
-  await query(`UPDATE expenses SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`, [now, req.params.id]);
+  await query(
+    `UPDATE expenses SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
+    [now, req.params.id],
+  );
   res.json({ success: true });
 });
-
 
 // ==================== demo ==================
 
@@ -1123,17 +1517,140 @@ app.get("/api/demo", async (req, res) => {
 });
 
 app.post("/api/demo-booking", async (req, res) => {
-  const {name, phone, pharmacy, preferredDate, preferredTime, email} = req.body
+  const { name, phone, pharmacy, preferredDate, preferredTime, email } =
+    req.body;
+
+  const demoId = crypto.randomUUID();
 
   try {
-    await query(`INSERT INTO demo_pharmacies (name, phone, pharmacy, preferredDate, preferredTime, email) VALUES ($1, $2, $3, $4, $5, $6)`, [name, phone, pharmacy, preferredDate, preferredTime, email]);
+    await query(
+      `INSERT INTO demo_pharmacies (id, name, phone, pharmacy, "preferredDate", "preferredTime", email) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [demoId, name, phone, pharmacy, preferredDate, preferredTime, email],
+    );
     res.json({ success: true });
   } catch (error) {
     console.error("Add demo error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
- 
+});
+
+app.get("/api/demo-booking/availability", async (req, res) => {
+  try {
+    const { rows } = await query(
+      `SELECT 
+         TO_CHAR("preferredDate", 'YYYY-MM-DD') AS date, 
+         TO_CHAR("preferredTime", 'FMHH12:MI AM') AS time 
+       FROM demo_pharmacies`
+    );
+    res.json({ booked: rows });
+  } catch (err) {
+    console.error("Get availability error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.put("/api/demo-booking/:id", adminCheck, async (req, res) => {
+  const contactId = req.params.id;
+  const { status } = req.body;
+  try {
+    await query(
+      `UPDATE demo_pharmacies SET status = $1 WHERE id = $2`,
+      [status, contactId],
+    )
+  } catch (err) {
+    console.error("Update demo error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 })
+
+// ==================== contact ================
+app.get("/api/contact", async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM contact_form`);
+    res.json(rows);
+  } catch (err) {
+    console.error("Get demo error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/post-contact", async (req, res) => {
+  const { name, email, phone, subject, message } = req.body;
+
+  const contactId = crypto.randomUUID();
+
+  try {
+    await query(
+      `INSERT INTO contact_form (id, name, phone, subject, email, message) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [contactId, name, phone, subject, email, message],
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Add demo error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// update contact
+app.put("/api/update-contact/:id",adminCheck, async (req, res) => {
+  const contactId = req.params.id;
+  const { status } = req.body;
+
+  try {
+    await query(
+      `UPDATE contact_form SET status = $1 WHERE id = $2`,
+      [status, contactId],
+    )
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Update contact error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ==================== trial ================
+app.get("/api/trial", async (req, res) => {
+  try {
+    const { rows } = await query(`SELECT * FROM trial`);
+    res.json(rows);
+  } catch (err) {
+    console.error("Get demo error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.post("/api/post-trial", async (req, res) => {
+  const { pharmacyName, ownerName, email, phone, location, message } = req.body;
+
+  const trialId = crypto.randomUUID();
+
+  try {
+    await query(
+      `INSERT INTO trial (id, "ownerName", phone, "pharmacyName", email, message, location) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [trialId, ownerName, phone, pharmacyName, email, message, location],
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Add demo error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// update trial status
+app.put("/api/trial/:id", adminCheck, async (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  try {
+    await query(
+      `UPDATE trial SET "status" = $1 WHERE id = $2`,
+      [status, id],
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Update trial error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // ===================== 404 =====================
 app.use((req, res) => {
