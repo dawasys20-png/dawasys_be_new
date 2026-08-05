@@ -246,6 +246,7 @@ app.post("/api/login-staff", limiter, async (req, res) => {
     delete staffPayload.userName;
 
     const { accessToken, refreshToken } = await issueTokenPair(
+      false,
       staffPayload,
       staff.id,
       "staff",
