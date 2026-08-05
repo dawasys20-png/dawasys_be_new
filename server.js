@@ -205,6 +205,7 @@ app.post("/api/login", limiter, async (req, res) => {
     return res.status(401).json({ error: "Invalid credentials" });
 
   const { accessToken, refreshToken } = await issueTokenPair(
+    false,
     user,
     user.id,
     "user",
@@ -408,62 +409,84 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 app.post("/api/auth/refresh-token", limiter, async (req, res) => {
+  const Client = await pool.connect();
   try {
     const { refreshToken } = req.body;
     if (!refreshToken)
       return res.status(400).json({ error: "Refresh token required" });
 
-    const record = await rotateRefreshToken(refreshToken);
-    if (!record)
-      return res
-        .status(401)
-        .json({ error: "Invalid or expired refresh token" });
+    await Client.query("BEGIN");
+
+    const record = await rotateRefreshToken(Client, refreshToken);
+
+    if (!record) {
+      await Client.query("ROLLBACK");
+      return res.status(401).json({
+        error: "Invalid or expired refresh token",
+        code: "INVALID_REFRESH_TOKEN",
+      });
+    }
 
     let payload;
-    if (record.subjecttype === "staff") {
-      const { rows } = await query(
+    if (record.subjectType === "staff") {
+      const { rows } = await Client.query(
         'SELECT * FROM staff WHERE id = $1 AND "deletedAt" IS NULL',
         [record.subjectId],
       );
       const staff = rows[0];
-      if (!staff)
+      if (!staff) {
+        await Client.query("ROLLBACK");
         return res.status(401).json({ error: "Staff no longer exists" });
+      }
       payload = { ...staff, username: staff.userName };
       delete payload.userName;
     } else {
-      const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [
+      const { rows } = await Client.query("SELECT * FROM users WHERE id = $1", [
         record.subjectId,
       ]);
       payload = rows[0];
-      if (!payload)
+      if (!payload) {
+        await Client.query("ROLLBACK");
         return res.status(401).json({ error: "User no longer exists" });
+      }
     }
 
     const { accessToken, refreshToken: newRefreshToken } = await issueTokenPair(
+      Client,
       payload,
       record.subjectId,
       record.subjectType,
     );
+    await Client.query("COMMIT");
     res.json({ token: accessToken, refreshToken: newRefreshToken });
   } catch (err) {
+    await Client.query("ROLLBACK");
     console.error("Refresh token error:", err);
     res.status(500).json({ error: "Internal server error" });
+  } finally {
+    Client.release();
   }
 });
 
 app.post("/api/auth/logout", async (req, res) => {
+  const Client = await pool.connect();
   try {
     const { refreshToken } = req.body;
     if (!refreshToken)
       return res.status(400).json({ error: "Refresh token required" });
-    await query(
+    await Client.query("BEGIN");
+    await Client.query(
       `UPDATE refresh_tokens SET "revokedAt" = now() WHERE "tokenHash" = $1`,
       [hashToken(refreshToken)],
     );
+    await Client.query("COMMIT");
     res.json({ success: true });
   } catch (err) {
+    await Client.query("ROLLBACK");
     console.error("Logout error:", err);
     res.status(500).json({ error: "Internal server error" });
+  } finally {
+    Client.release();
   }
 });
 
@@ -1247,7 +1270,7 @@ app.get("/api/users", authMiddleware, adminCheck, async (req, res) => {
     console.error("Get users error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-})
+});
 
 // ===================== LICENSES (paid) =====================
 app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
@@ -1482,12 +1505,10 @@ app.post("/api/expenses", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     if (err.code === "23503") {
-      return res
-        .status(409)
-        .json({
-          error: "PARENT_NOT_SYNCED",
-          message: `Referenced pharmacy (${pharmacyId}) does not exist on this server yet`,
-        });
+      return res.status(409).json({
+        error: "PARENT_NOT_SYNCED",
+        message: `Referenced pharmacy (${pharmacyId}) does not exist on this server yet`,
+      });
     }
     console.error("Add expense error:", err);
     res.status(500).json({ error: "Internal server error" });
@@ -1540,7 +1561,7 @@ app.get("/api/demo-booking/availability", async (req, res) => {
       `SELECT 
          TO_CHAR("preferredDate", 'YYYY-MM-DD') AS date, 
          TO_CHAR("preferredTime", 'FMHH12:MI AM') AS time 
-       FROM demo_pharmacies`
+       FROM demo_pharmacies`,
     );
     res.json({ booked: rows });
   } catch (err) {
@@ -1553,15 +1574,15 @@ app.put("/api/demo-booking/:id", adminCheck, async (req, res) => {
   const contactId = req.params.id;
   const { status } = req.body;
   try {
-    await query(
-      `UPDATE demo_pharmacies SET status = $1 WHERE id = $2`,
-      [status, contactId],
-    )
+    await query(`UPDATE demo_pharmacies SET status = $1 WHERE id = $2`, [
+      status,
+      contactId,
+    ]);
   } catch (err) {
     console.error("Update demo error:", err);
     res.status(500).json({ error: "Internal server error" });
   }
-})
+});
 
 // ==================== contact ================
 app.get("/api/contact", async (req, res) => {
@@ -1592,15 +1613,15 @@ app.post("/api/post-contact", async (req, res) => {
 });
 
 // update contact
-app.put("/api/update-contact/:id",adminCheck, async (req, res) => {
+app.put("/api/update-contact/:id", adminCheck, async (req, res) => {
   const contactId = req.params.id;
   const { status } = req.body;
 
   try {
-    await query(
-      `UPDATE contact_form SET status = $1 WHERE id = $2`,
-      [status, contactId],
-    )
+    await query(`UPDATE contact_form SET status = $1 WHERE id = $2`, [
+      status,
+      contactId,
+    ]);
     res.json({ success: true });
   } catch (error) {
     console.error("Update contact error:", error);
@@ -1641,10 +1662,7 @@ app.put("/api/trial/:id", adminCheck, async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   try {
-    await query(
-      `UPDATE trial SET "status" = $1 WHERE id = $2`,
-      [status, id],
-    );
+    await query(`UPDATE trial SET "status" = $1 WHERE id = $2`, [status, id]);
     res.json({ success: true });
   } catch (error) {
     console.error("Update trial error:", error);
