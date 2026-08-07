@@ -1306,7 +1306,7 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
     await axios.post(
       `${process.env.MARZ_API_URL}/collect-money`,
       {
-        amount: 500,
+        amount,
         phone_number: `${phone}`,
         country: "UG",
         reference: `${reference}`,
