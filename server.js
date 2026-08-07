@@ -1306,7 +1306,7 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
     await axios.post(
       `${process.env.MARZ_API_URL}/collect-money`,
       {
-        amount,
+        amount: 500,
         phone_number: `${phone}`,
         country: "UG",
         reference: `${reference}`,
@@ -1334,8 +1334,8 @@ app.post("/marz/callback", async (req, res) => {
   res.status(200).json({ received: true });
   try {
     const { event_type, transaction } = req.body;
-    if (event_type !== "collection.completed") return;
-    if (transaction?.status !== "completed") return;
+    // if (event_type !== "collection.completed") return;
+    // if (transaction?.status !== "completed") return;
 
     const transactionReference = transaction.uuid;
     const paymentReference = transaction.reference;
@@ -1347,7 +1347,14 @@ app.post("/marz/callback", async (req, res) => {
         headers: { Authorization: `Basic ${process.env.MARZ_API_CREDENTIALS}` },
       },
     );
-    if (verifyRes.data?.transaction?.status !== "completed") return;
+    if (verifyRes.data?.transaction?.status !== "completed") {
+      await pool.query(
+        `UPDATE licenses SET status = 'failed', "paymentStatus" = 'failed' WHERE "paymentReference" = $1`,
+        [paymentReference],
+      );
+      console.log("Payment failed:", paymentReference);
+      return;
+    };
 
     const existing = await pool.query(
       `SELECT status FROM licenses WHERE "paymentReference" = $1`,
@@ -1364,6 +1371,23 @@ app.post("/marz/callback", async (req, res) => {
     console.error("Callback error:", err);
   }
 });
+
+// Verify paid licences
+app.get("/api/licenses/verify", limiter, async (req, res) => {
+  const { licenseKey } = req.query;
+  if (!licenseKey) return res.status(400).json({ error: "License key required" });
+  const result = await pool.query(
+    "SELECT * FROM licenses WHERE licenseKey = $1",
+    [licenseKey],
+  );
+  const license = result.rows[0];
+  if (!license) return res.status(404).json({ error: "Invalid license key" });
+
+  res.json({
+    license
+  })
+});
+
 
 app.post("/api/licenses/activate", limiter, async (req, res) => {
   const { error } = activateSchema.validate(req.body);
