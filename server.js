@@ -9,7 +9,6 @@ pg.types.setTypeParser(1184, (str) =>
 require("dotenv").config();
 const express = require("express");
 const path = require("path");
-const { Pool } = require("pg");
 const crypto = require("crypto");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
@@ -45,6 +44,7 @@ const {
 } = require("./lib/dbFunc");
 const uuid = require("uuid");
 const axios = require("axios");
+const pool = require("./lib/db");
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -53,14 +53,15 @@ const limiter = rateLimit({
   message: { error: "Too many requests" },
 });
 
-// PostgreSQL connection pool
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl:
-    process.env.NODE_ENV === "production"
-      ? { rejectUnauthorized: false }
-      : false,
-});
+
+
+// setInterval(() => {
+//   console.log("[SERVER POOL]", {
+//     total: pool.totalCount,
+//     idle: pool.idleCount,
+//     waiting: pool.waitingCount,
+//   });
+// }, 1000);
 
 // Test connection and run migrations
 (async () => {
@@ -162,10 +163,50 @@ async function recomputeRemoteMedicineQuantity(medicineId) {
 // of trusting a client-supplied pharmacyId (or, when none is supplied,
 // silently returning data for every pharmacy in the system).
 async function getAccessiblePharmacyIds(userId) {
-  const result = await query('SELECT "pharmacyIds" FROM staff WHERE id = $1', [
-    userId,
-  ]);
-  return result.rows[0]?.pharmacyIds || [];
+  const started = Date.now();
+
+  // console.log(
+  //   `[ACCESS] START user=${userId}`
+  // );
+
+  const t1 = Date.now();
+
+  const staffResult = await query(
+    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
+    [userId]
+  );
+
+  // console.log(
+  //   `[ACCESS] staff query: ${Date.now() - t1}ms`
+  // );
+
+  const staffPharmacyIds =
+    staffResult.rows[0]?.pharmacyIds || [];
+
+  const t2 = Date.now();
+
+  const ownedResult = await query(
+    'SELECT id FROM "pharmacyInfo" WHERE "userId" = $1 AND "deletedAt" IS NULL',
+    [userId]
+  );
+
+  // console.log(
+  //   `[ACCESS] pharmacy ownership query: ${Date.now() - t2}ms`
+  // );
+
+  const ownedIds = ownedResult.rows.map(
+    (r) => r.id
+  );
+
+  const result = Array.from(
+    new Set([...staffPharmacyIds, ...ownedIds])
+  );
+
+  // console.log(
+  //   `[ACCESS] END total=${Date.now() - started}ms ids=${result.length}`
+  // );
+
+  return result;
 }
 
 const activateSchema = Joi.object({
@@ -410,8 +451,10 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 app.post("/api/auth/refresh-token", limiter, async (req, res) => {
-  const Client = await pool.connect();
+  let Client;
   try {
+    Client = await pool.connect();
+
     const { refreshToken } = req.body;
     if (!refreshToken)
       return res.status(400).json({ error: "Refresh token required" });
@@ -465,13 +508,18 @@ app.post("/api/auth/refresh-token", limiter, async (req, res) => {
     console.error("Refresh token error:", err);
     res.status(500).json({ error: "Internal server error" });
   } finally {
-    Client.release();
+    if (Client) {
+      Client.release();
+    }
   }
 });
 
 app.post("/api/auth/logout", async (req, res) => {
-  const Client = await pool.connect();
+  let Client;
+
   try {
+    Client = await pool.connect();
+
     const { refreshToken } = req.body;
     if (!refreshToken)
       return res.status(400).json({ error: "Refresh token required" });
@@ -487,7 +535,7 @@ app.post("/api/auth/logout", async (req, res) => {
     console.error("Logout error:", err);
     res.status(500).json({ error: "Internal server error" });
   } finally {
-    Client.release();
+    if (Client) Client.release();
   }
 });
 
@@ -497,27 +545,31 @@ app.post("/api/auth/logout", async (req, res) => {
 // deletions too) rather than the "active only" list the plain UI call wants.
 app.get("/api/medicines", authMiddleware, async (req, res) => {
   const { pharmacyId, since } = req.query;
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+
+  // A client-supplied pharmacyId must be one this user can actually see —
+  // otherwise any authenticated user could read any pharmacy's medicines
+  // just by knowing/guessing its id.
+  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  if (scopedIds.length === 0) return res.json([]);
 
   if (since !== undefined) {
-    const params = [sinceOrEpoch(since)];
-    let sql = `SELECT *, CASE WHEN "isDeleted" = 1 THEN "deletedAt" ELSE NULL END as "deletedAt" FROM medicines WHERE "updatedAt" > $1`;
-    if (pharmacyId) {
-      params.push(pharmacyId);
-      sql += ` AND "pharmacyId" = $2`;
-    }
-    sql += ` ORDER BY "updatedAt" ASC`;
-    const { rows } = await query(sql, params);
+    const { rows } = await query(
+      `SELECT *, CASE WHEN "isDeleted" = 1 THEN "deletedAt" ELSE NULL END as "deletedAt"
+       FROM medicines WHERE "updatedAt" > $1 AND "pharmacyId" = ANY($2::uuid[])
+       ORDER BY "updatedAt" ASC`,
+      [sinceOrEpoch(since), scopedIds],
+    );
     return res.json(rows);
   }
 
-  const params = [];
-  let sql = `SELECT * FROM medicines WHERE "isDeleted" = 0`;
-  if (pharmacyId) {
-    params.push(pharmacyId);
-    sql += ` AND "pharmacyId" = $1`;
-  }
-  sql += ` ORDER BY name`;
-  const { rows } = await query(sql, params);
+  const { rows } = await query(
+    `SELECT * FROM medicines WHERE "isDeleted" = 0 AND "pharmacyId" = ANY($1::uuid[]) ORDER BY name`,
+    [scopedIds],
+  );
   res.json(rows);
 });
 
@@ -617,18 +669,22 @@ app.delete("/api/medicines/:id", authMiddleware, async (req, res) => {
 // also returns recently-voided ones so other terminals can reconcile.
 app.get("/api/transactions", authMiddleware, async (req, res) => {
   const { pharmacyId, since } = req.query;
-  const params = [];
-  let sql = `SELECT * FROM transactions WHERE 1=1`;
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+
+  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  if (scopedIds.length === 0) return res.json([]);
+
+  const params = [scopedIds];
+  let sql = `SELECT * FROM transactions WHERE "pharmacyId" = ANY($1::uuid[])`;
 
   if (since !== undefined) {
     params.push(sinceOrEpoch(since));
     sql += ` AND "updatedAt" > $${params.length}`;
   } else {
     sql += ` AND "deletedAt" IS NULL`;
-  }
-  if (pharmacyId) {
-    params.push(pharmacyId);
-    sql += ` AND "pharmacyId" = $${params.length}`;
   }
   sql += ` ORDER BY date DESC`;
 
@@ -707,6 +763,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
 
     res.json(rows[0] || { ...tx, id });
   } catch (err) {
+     console.error("Add transaction error:", err);
     if (err.code === "23503") {
       return res.status(409).json({
         error: "PARENT_NOT_SYNCED",
@@ -744,14 +801,18 @@ app.get(
 // so they can be scoped and since-filtered like everything else.
 app.get("/api/inventory-movements", authMiddleware, async (req, res) => {
   const { pharmacyId, since } = req.query;
-  const params = [sinceOrEpoch(since)];
-  let sql = `SELECT * FROM "inventory_movements" WHERE "updatedAt" > $1`;
-  if (pharmacyId) {
-    params.push(pharmacyId);
-    sql += ` AND "pharmacyId" = $${params.length}`;
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+
+  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+    return res.status(403).json({ error: "Forbidden" });
   }
-  sql += ` ORDER BY "updatedAt" ASC`;
-  const { rows } = await query(sql, params);
+  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  if (scopedIds.length === 0) return res.json([]);
+
+  const { rows } = await query(
+    `SELECT * FROM "inventory_movements" WHERE "updatedAt" > $1 AND "pharmacyId" = ANY($2::uuid[]) ORDER BY "updatedAt" ASC`,
+    [sinceOrEpoch(since), scopedIds],
+  );
   res.json(rows);
 });
 
@@ -789,11 +850,15 @@ app.post("/api/inventory-movements", authMiddleware, async (req, res) => {
   });
 });
 
-// Legacy camelCase routes kept for backward compatibility with older
-// clients/web builds that haven't switched to the hyphenated path yet.
+// Legacy route had NO scoping at all — returned every movement across
+// every pharmacy in the system to any authenticated caller.
 app.get("/api/inventoryMovements", authMiddleware, async (req, res) => {
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (accessibleIds.length === 0) return res.json([]);
+
   const { rows } = await query(
-    `SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL ORDER BY "createdAt" DESC`,
+    `SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL AND "pharmacyId" = ANY($1::uuid[]) ORDER BY "createdAt" DESC`,
+    [accessibleIds],
   );
   res.json(rows);
 });
@@ -919,16 +984,12 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
   const { since } = req.query;
 
   if (since !== undefined) {
-    const staffResult = await query(
-      'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-      [req.user.id],
-    );
-    const pharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
-    if (pharmacyIds.length === 0) return res.json([]);
+    const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+    if (accessibleIds.length === 0) return res.json([]);
 
     const { rows } = await query(
       `SELECT * FROM "pharmacyInfo" WHERE ("userId" = $1 OR id = ANY($2::uuid[])) AND "updatedAt" > $3 ORDER BY "updatedAt" ASC`,
-      [req.user.id, pharmacyIds, sinceOrEpoch(since)],
+      [req.user.id, accessibleIds, sinceOrEpoch(since)],
     );
     return res.json(rows);
   }
@@ -948,20 +1009,14 @@ app.get("/api/pharmacies", authMiddleware, async (req, res) => {
 });
 
 app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
-  const staffResult = await query(
-    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-    [req.user.id],
-  );
-  const staffPharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (accessibleIds.length === 0) return res.json([]);
 
-  const pharmaciesResult = await query(
-    `SELECT * FROM "pharmacyInfo"
-     WHERE ("userId" = $1 OR id = ANY($2::uuid[]))
-       AND "deletedAt" IS NULL`,
-    [req.user.id, staffPharmacyIds],
+  const result = await query(
+    `SELECT * FROM "pharmacyInfo" WHERE id = ANY($1::uuid[]) AND "deletedAt" IS NULL`,
+    [accessibleIds],
   );
-
-  res.json(pharmaciesResult.rows);
+  res.json(result.rows);
 });
 
 app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
@@ -1124,16 +1179,12 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
 // to already know which pharmacyId to ask about.
 app.get("/api/staff", authMiddleware, async (req, res) => {
   const { since } = req.query;
-  const ownStaffResult = await query(
-    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-    [req.user.id],
-  );
-  const pharmacyIds = ownStaffResult.rows[0]?.pharmacyIds || [];
-  if (pharmacyIds.length === 0) return res.json([]);
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (accessibleIds.length === 0) return res.json([]);
 
   const { rows } = await query(
     `SELECT * FROM staff WHERE "pharmacyIds" ?| $1::text[] AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
-    [pharmacyIds, sinceOrEpoch(since)],
+    [accessibleIds, sinceOrEpoch(since)],
   );
   res.json(rows);
 });
@@ -1142,6 +1193,11 @@ app.get("/api/staff", authMiddleware, async (req, res) => {
 // old behavior broke every sync cycle where nothing had changed since
 // last pull, since an empty array is a completely normal, expected result).
 app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (!accessibleIds.includes(req.params.pharmacyId)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
   const { since } = req.query;
 
   if (since !== undefined) {
@@ -1354,7 +1410,7 @@ app.post("/marz/callback", async (req, res) => {
       );
       console.log("Payment failed:", paymentReference);
       return;
-    };
+    }
 
     const existing = await pool.query(
       `SELECT status FROM licenses WHERE "paymentReference" = $1`,
@@ -1375,7 +1431,8 @@ app.post("/marz/callback", async (req, res) => {
 // Verify paid licences
 app.get("/api/licenses/verify", limiter, async (req, res) => {
   const { licenseKey } = req.query;
-  if (!licenseKey) return res.status(400).json({ error: "License key required" });
+  if (!licenseKey)
+    return res.status(400).json({ error: "License key required" });
   const result = await pool.query(
     "SELECT * FROM licenses WHERE licenseKey = $1",
     [licenseKey],
@@ -1384,10 +1441,9 @@ app.get("/api/licenses/verify", limiter, async (req, res) => {
   if (!license) return res.status(404).json({ error: "Invalid license key" });
 
   res.json({
-    license
-  })
+    license,
+  });
 });
-
 
 app.post("/api/licenses/activate", limiter, async (req, res) => {
   const { error } = activateSchema.validate(req.body);
@@ -1475,21 +1531,22 @@ app.get("/api/user/licenses", authMiddleware, async (req, res) => {
 // id segment, scoped server-side to the user's accessible pharmacies.
 app.get("/api/expenses", authMiddleware, async (req, res) => {
   const { since } = req.query;
-  const ownStaffResult = await query(
-    'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-    [req.user.id],
-  );
-  const pharmacyIds = ownStaffResult.rows[0]?.pharmacyIds || [];
-  if (pharmacyIds.length === 0) return res.json([]);
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (accessibleIds.length === 0) return res.json([]);
 
   const { rows } = await query(
     `SELECT * FROM expenses WHERE "pharmacyId" = ANY($1::uuid[]) AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
-    [pharmacyIds, sinceOrEpoch(since)],
+    [accessibleIds, sinceOrEpoch(since)],
   );
   res.json(rows);
 });
 
 app.get("/api/expenses/:pharmacyId", authMiddleware, async (req, res) => {
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  if (!accessibleIds.includes(req.params.pharmacyId)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
   const { since } = req.query;
 
   if (since !== undefined) {
@@ -1703,9 +1760,7 @@ app.use((req, res) => {
 const PORT = process.env.PORT || 5000;
 
 // connect to database and start server
-pool.connect().then(() => {
   app.listen(PORT, () => {
     console.log(`✅ Server running on:`);
     console.log(`   Local:   http://localhost:${PORT}`);
   });
-});
