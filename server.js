@@ -701,6 +701,42 @@ app.get("/api/transactions", authMiddleware, async (req, res) => {
   res.json(withItems);
 });
 
+app.get(
+  "/api/transactions/deleted/:pharmacyId",
+  authMiddleware,
+  async (req, res) => {
+    const { since } = req.query;
+    const { pharmacyId } = req.params;
+    const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+
+    if (!accessibleIds.includes(pharmacyId)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const params = [pharmacyId];
+    let sql =
+      'SELECT * FROM transactions WHERE "pharmacyId" = $1 AND "deletedAt" IS NOT NULL';
+
+    if (since !== undefined) {
+      params.push(sinceOrEpoch(since));
+      sql += ` AND "updatedAt" > $${params.length}`;
+    }
+    sql += ' ORDER BY "deletedAt" DESC';
+
+    const { rows: transactions } = await query(sql, params);
+    const withItems = await Promise.all(
+      transactions.map(async (tx) => {
+        const items = await query(
+          `SELECT * FROM "transactionItems" WHERE "transactionId" = $1`,
+          [tx.id],
+        );
+        return { ...tx, items: items.rows };
+      }),
+    );
+    res.json(withItems);
+  },
+);
+
 app.post("/api/transactions", authMiddleware, async (req, res) => {
   const tx = req.body;
   const id = tx.id || crypto.randomUUID();
