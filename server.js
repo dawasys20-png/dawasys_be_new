@@ -53,8 +53,6 @@ const limiter = rateLimit({
   message: { error: "Too many requests" },
 });
 
-
-
 // setInterval(() => {
 //   console.log("[SERVER POOL]", {
 //     total: pool.totalCount,
@@ -173,34 +171,29 @@ async function getAccessiblePharmacyIds(userId) {
 
   const staffResult = await query(
     'SELECT "pharmacyIds" FROM staff WHERE id = $1',
-    [userId]
+    [userId],
   );
 
   // console.log(
   //   `[ACCESS] staff query: ${Date.now() - t1}ms`
   // );
 
-  const staffPharmacyIds =
-    staffResult.rows[0]?.pharmacyIds || [];
+  const staffPharmacyIds = staffResult.rows[0]?.pharmacyIds || [];
 
   const t2 = Date.now();
 
   const ownedResult = await query(
     'SELECT id FROM "pharmacyInfo" WHERE "userId" = $1 AND "deletedAt" IS NULL',
-    [userId]
+    [userId],
   );
 
   // console.log(
   //   `[ACCESS] pharmacy ownership query: ${Date.now() - t2}ms`
   // );
 
-  const ownedIds = ownedResult.rows.map(
-    (r) => r.id
-  );
+  const ownedIds = ownedResult.rows.map((r) => r.id);
 
-  const result = Array.from(
-    new Set([...staffPharmacyIds, ...ownedIds])
-  );
+  const result = Array.from(new Set([...staffPharmacyIds, ...ownedIds]));
 
   // console.log(
   //   `[ACCESS] END total=${Date.now() - started}ms ids=${result.length}`
@@ -715,13 +708,13 @@ app.get(
 
     const params = [pharmacyId];
     let sql =
-      'SELECT * FROM transactions WHERE "pharmacyId" = $1 AND "deletedAt" IS NOT NULL';
+      'SELECT t.*, s."userName" AS "cashierName" FROM transactions t LEFT JOIN staff s ON s.id = t."cashierId" WHERE t."pharmacyId" = $1 AND t."deletedAt" IS NOT NULL';
 
     if (since !== undefined) {
       params.push(sinceOrEpoch(since));
-      sql += ` AND "updatedAt" > $${params.length}`;
+      sql += ` AND t."updatedAt" > $${params.length}`;
     }
-    sql += ' ORDER BY "deletedAt" DESC';
+    sql += ' ORDER BY t."deletedAt" DESC';
 
     const { rows: transactions } = await query(sql, params);
     const withItems = await Promise.all(
@@ -799,7 +792,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
 
     res.json(rows[0] || { ...tx, id });
   } catch (err) {
-     console.error("Add transaction error:", err);
+    console.error("Add transaction error:", err);
     if (err.code === "23503") {
       return res.status(409).json({
         error: "PARENT_NOT_SYNCED",
@@ -821,6 +814,7 @@ app.delete("/api/transactions/:id", authMiddleware, async (req, res) => {
     `UPDATE "transactionItems" SET "deletedAt" = $1, "updatedAt" = $1 WHERE "transactionId" = $2`,
     [now, req.params.id],
   );
+
   res.json({ success: true });
 });
 
@@ -1796,7 +1790,7 @@ app.use((req, res) => {
 const PORT = process.env.PORT || 5000;
 
 // connect to database and start server
-  app.listen(PORT, () => {
-    console.log(`✅ Server running on:`);
-    console.log(`   Local:   http://localhost:${PORT}`);
-  });
+app.listen(PORT, () => {
+  console.log(`✅ Server running on:`);
+  console.log(`   Local:   http://localhost:${PORT}`);
+});
