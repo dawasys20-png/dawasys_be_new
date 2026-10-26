@@ -53,6 +53,12 @@ const limiter = rateLimit({
   message: { error: "Too many requests" },
 });
 
+const LICENSE_PLANS = {
+  Starter: { maxUsers: 2, maxMachines: 1, amount: 250000 },
+  Growth: { maxUsers: 5, maxMachines: 3, amount: 450000 },
+  Business: { maxUsers: 10, maxMachines: 5, amount: 650000 },
+};
+
 // setInterval(() => {
 //   console.log("[SERVER POOL]", {
 //     total: pool.totalCount,
@@ -148,7 +154,7 @@ function sinceOrEpoch(since) {
 async function recomputeRemoteMedicineQuantity(medicineId) {
   const now = new Date().toISOString();
   await query(
-    `UPDATE medicines SET quantity = (
+    `UPDATE products SET quantity = (
        SELECT COALESCE(SUM(quantity), 0) FROM "inventory_movements"
        WHERE "medicineId" = $1 AND "deletedAt" IS NULL
      ), "updatedAt" = $2 WHERE id = $1`,
@@ -158,7 +164,7 @@ async function recomputeRemoteMedicineQuantity(medicineId) {
 
 // Central authorization lookup: which pharmacies can this authenticated
 // user actually see. Used to scope every syncable-entity GET route instead
-// of trusting a client-supplied pharmacyId (or, when none is supplied,
+// of trusting a client-supplied businessId (or, when none is supplied,
 // silently returning data for every pharmacy in the system).
 async function getAccessiblePharmacyIds(userId) {
   const started = Date.now();
@@ -183,7 +189,7 @@ async function getAccessiblePharmacyIds(userId) {
   const t2 = Date.now();
 
   const ownedResult = await query(
-    'SELECT id FROM "pharmacyInfo" WHERE "userId" = $1 AND "deletedAt" IS NULL',
+    'SELECT id FROM "businesses" WHERE "userId" = $1 AND "deletedAt" IS NULL',
     [userId],
   );
 
@@ -224,6 +230,18 @@ app.set("trust proxy", 1);
 app.use(cors());
 app.use(morgan("tiny"));
 app.use(express.json());
+app.use((req, _res, next) => {
+  if (
+    req.body &&
+    typeof req.body === "object" &&
+    !Array.isArray(req.body) &&
+    req.body.businessId === undefined &&
+    req.body.pharmacyId !== undefined
+  ) {
+    req.body = { ...req.body, businessId: req.body.pharmacyId };
+  }
+  next();
+});
 
 app.get("/api/health", (req, res) => {
   res.status(200).json({ message: "Available" });
@@ -249,18 +267,18 @@ app.post("/api/login", limiter, async (req, res) => {
 
 app.post("/api/login-staff", limiter, async (req, res) => {
   try {
-    const { username, pin: password, pharmacyCode } = req.body;
+    const { username, pin: password, businessId } = req.body;
 
     const staffResult = await query(
       `
       SELECT s.*
       FROM staff s
-      JOIN "pharmacyInfo" p ON p.id = ANY(
+      JOIN "businesses" p ON p.id = ANY(
         ARRAY(SELECT jsonb_array_elements_text(s."pharmacyIds")::uuid)
       )
-      WHERE s."userName" = $1 AND p."pharmacyCode" = $2 AND s."deletedAt" IS NULL
+      WHERE s."userName" = $1 AND p.id = $2 AND s."deletedAt" IS NULL
       `,
-      [username, pharmacyCode],
+      [username, businessId],
     );
 
     const staff = staffResult.rows[0];
@@ -271,8 +289,8 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       return res.status(401).json({ error: "Invalid credentials" });
 
     const pharmacyResult = await query(
-      `SELECT * FROM "pharmacyInfo" WHERE "pharmacyCode" = $1`,
-      [pharmacyCode],
+      `SELECT * FROM "businesses" WHERE id = $1`,
+      [businessId],
     );
     const pharmacy = pharmacyResult.rows[0];
 
@@ -536,23 +554,24 @@ app.post("/api/auth/logout", async (req, res) => {
 // since-filtered: sync pulls call this with ?since=<iso> and expect an
 // array (including recently-deleted rows, so other terminals learn about
 // deletions too) rather than the "active only" list the plain UI call wants.
-app.get("/api/medicines", authMiddleware, async (req, res) => {
-  const { pharmacyId, since } = req.query;
+app.get(["/api/products", "/api/medicines"], authMiddleware, async (req, res) => {
+  const businessId = req.query.businessId ?? req.query.pharmacyId;
+  const { since } = req.query;
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
 
-  // A client-supplied pharmacyId must be one this user can actually see —
-  // otherwise any authenticated user could read any pharmacy's medicines
+  // A client-supplied businessId must be one this user can actually see —
+  // otherwise any authenticated user could read any pharmacy's products
   // just by knowing/guessing its id.
-  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+  if (businessId && !accessibleIds.includes(businessId)) {
     return res.status(403).json({ error: "Forbidden" });
   }
-  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  const scopedIds = businessId ? [businessId] : accessibleIds;
   if (scopedIds.length === 0) return res.json([]);
 
   if (since !== undefined) {
     const { rows } = await query(
       `SELECT *, CASE WHEN "isDeleted" = 1 THEN "deletedAt" ELSE NULL END as "deletedAt"
-       FROM medicines WHERE "updatedAt" > $1 AND "pharmacyId" = ANY($2::uuid[])
+       FROM products WHERE "updatedAt" > $1 AND "businessId" = ANY($2::uuid[])
        ORDER BY "updatedAt" ASC`,
       [sinceOrEpoch(since), scopedIds],
     );
@@ -560,38 +579,42 @@ app.get("/api/medicines", authMiddleware, async (req, res) => {
   }
 
   const { rows } = await query(
-    `SELECT * FROM medicines WHERE "isDeleted" = 0 AND "pharmacyId" = ANY($1::uuid[]) ORDER BY name`,
+    `SELECT * FROM products WHERE "isDeleted" = 0 AND "businessId" = ANY($1::uuid[]) ORDER BY name`,
     [scopedIds],
   );
   res.json(rows);
 });
 
-app.get("/api/medicines/:id", authMiddleware, async (req, res) => {
+app.get(["/api/products/:id", "/api/medicines/:id"], authMiddleware, async (req, res) => {
   const medicine = await getMedicineById(req.params.id);
   if (!medicine) return res.status(404).json({ error: "Not found" });
   res.json(medicine);
 });
 
-app.post("/api/medicines", authMiddleware, async (req, res) => {
+app.post(["/api/products", "/api/medicines"], authMiddleware, async (req, res) => {
   // Bypasses dbFunc.addMedicine deliberately — that function generates
   // its own id via crypto.randomUUID(), discarding the id the sync
   // client already assigned locally. That mismatch is exactly what
   // produced "Medicine not found" on later PUTs: the client marks its
   // own id as SYNCED, but the row that actually exists remotely has a
   // different id nothing will ever look up again.
-  const m = req.body;
+  const m = {
+    ...req.body,
+    businessId: req.body.businessId ?? req.body.pharmacyId,
+  };
   const id = m.id || crypto.randomUUID();
   const now = new Date().toISOString();
 
   try {
     const { rows } = await query(
-      `INSERT INTO medicines (
+      `INSERT INTO products (
         id, name, "unitType", quantity, boxes, "stripsPerBox", "unitsPerStrip",
         bottles, "mlPerBottle", price, "lowStockThreshold", "restockThreshold",
         "expiryDate", supplier, "batchNumber", "unitBuyingPrice", "isDeleted",
         "wholesaleStripPrice", "wholesaleBoxPrice", "createdAt", "updatedAt",
-        "buyingPrice", "sellingPrice", "pharmacyId"
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+        "buyingPrice", "sellingPrice", "businessId", "businessType", "productType",
+        "customProductType", "customPackagingValues"
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
       ON CONFLICT (id) DO NOTHING
       RETURNING *`,
       [
@@ -607,7 +630,9 @@ app.post("/api/medicines", authMiddleware, async (req, res) => {
         m.price,
         m.lowStockThreshold,
         m.restockThreshold,
-        m.expiryDate,
+        typeof m.expiryDate === "string" && m.expiryDate.trim() === ""
+          ? null
+          : m.expiryDate || null,
         m.supplier || null,
         m.batchNumber || null,
         m.unitBuyingPrice || 0,
@@ -618,7 +643,19 @@ app.post("/api/medicines", authMiddleware, async (req, res) => {
         m.updatedAt || now,
         m.buyingPrice || 0,
         m.sellingPrice || 0,
-        m.pharmacyId || null,
+        m.businessId || null,
+        m.businessType || null,
+        m.productType || null,
+        m.customProductType == null
+          ? null
+          : typeof m.customProductType === "string"
+            ? m.customProductType
+            : JSON.stringify(m.customProductType),
+        m.customPackagingValues == null
+          ? null
+          : typeof m.customPackagingValues === "string"
+            ? m.customPackagingValues
+            : JSON.stringify(m.customPackagingValues),
       ],
     );
     res.json(rows[0] || { ...m, id });
@@ -626,7 +663,7 @@ app.post("/api/medicines", authMiddleware, async (req, res) => {
     if (err.code === "23503") {
       return res.status(409).json({
         error: "PARENT_NOT_SYNCED",
-        message: `Referenced pharmacy (${m.pharmacyId}) does not exist on this server yet`,
+        message: `Referenced pharmacy (${m.businessId}) does not exist on this server yet`,
       });
     }
     console.error("Add medicine error:", err);
@@ -634,24 +671,28 @@ app.post("/api/medicines", authMiddleware, async (req, res) => {
   }
 });
 
-app.put("/api/medicines/:id", authMiddleware, async (req, res) => {
+app.put(["/api/products/:id", "/api/medicines/:id"], authMiddleware, async (req, res) => {
   try {
-    res.json(await updateMedicine(req.params.id, req.body));
+    const updates = {
+      ...req.body,
+      businessId: req.body.businessId ?? req.body.pharmacyId,
+    };
+    res.json(await updateMedicine(req.params.id, updates));
   } catch (err) {
     if (err.code === "23503") {
       return res.status(409).json({
         error: "PARENT_NOT_SYNCED",
-        message: `Referenced pharmacy (${req.body.pharmacyId}) does not exist on this server yet`,
+        message: `Referenced pharmacy (${req.body.businessId}) does not exist on this server yet`,
       });
     }
     res.status(400).json({ error: err.message });
   }
 });
 
-app.delete("/api/medicines/:id", authMiddleware, async (req, res) => {
+app.delete(["/api/products/:id", "/api/medicines/:id"], authMiddleware, async (req, res) => {
   const now = new Date().toISOString();
   await query(
-    `UPDATE medicines SET "isDeleted" = 1, "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
+    `UPDATE products SET "isDeleted" = 1, "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
     [now, req.params.id],
   );
   res.json({ success: true });
@@ -661,17 +702,18 @@ app.delete("/api/medicines/:id", authMiddleware, async (req, res) => {
 // Append-only: normal GET returns non-deleted only; since-filtered pull
 // also returns recently-voided ones so other terminals can reconcile.
 app.get("/api/transactions", authMiddleware, async (req, res) => {
-  const { pharmacyId, since } = req.query;
+  const businessId = req.query.businessId ?? req.query.pharmacyId;
+  const { since } = req.query;
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
 
-  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+  if (businessId && !accessibleIds.includes(businessId)) {
     return res.status(403).json({ error: "Forbidden" });
   }
-  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  const scopedIds = businessId ? [businessId] : accessibleIds;
   if (scopedIds.length === 0) return res.json([]);
 
   const params = [scopedIds];
-  let sql = `SELECT * FROM transactions WHERE "pharmacyId" = ANY($1::uuid[])`;
+  let sql = `SELECT * FROM transactions WHERE "businessId" = ANY($1::uuid[])`;
 
   if (since !== undefined) {
     params.push(sinceOrEpoch(since));
@@ -695,20 +737,20 @@ app.get("/api/transactions", authMiddleware, async (req, res) => {
 });
 
 app.get(
-  "/api/transactions/deleted/:pharmacyId",
+  "/api/transactions/deleted/:businessId",
   authMiddleware,
   async (req, res) => {
     const { since } = req.query;
-    const { pharmacyId } = req.params;
+    const { businessId } = req.params;
     const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
 
-    if (!accessibleIds.includes(pharmacyId)) {
+    if (!accessibleIds.includes(businessId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const params = [pharmacyId];
+    const params = [businessId];
     let sql =
-      'SELECT t.*, s."userName" AS "cashierName" FROM transactions t LEFT JOIN staff s ON s.id = t."cashierId" WHERE t."pharmacyId" = $1 AND t."deletedAt" IS NOT NULL';
+      'SELECT t.*, s."userName" AS "cashierName" FROM transactions t LEFT JOIN staff s ON s.id = t."cashierId" WHERE t."businessId" = $1 AND t."deletedAt" IS NOT NULL';
 
     if (since !== undefined) {
       params.push(sinceOrEpoch(since));
@@ -739,7 +781,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
     const { rows } = await query(
       `INSERT INTO transactions (
         id, "totalAmount", "paymentMethod", date, notes, "createdAt", "updatedAt", profit,
-        "transactionType", "packType", "pharmacyId", "cashierId", "billTotal"
+        "transactionType", "packType", "businessId", "cashierId", "billTotal"
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       ON CONFLICT (id) DO NOTHING
       RETURNING *`,
@@ -754,7 +796,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
         tx.profit,
         tx.transactionType,
         tx.packType || null,
-        tx.pharmacyId || null,
+        tx.businessId || null,
         tx.cashierId || null,
         tx.billTotal ?? tx.totalAmount,
       ],
@@ -769,7 +811,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
         await query(
           `INSERT INTO "transactionItems" (
             id, "transactionId", "medicineId", "medicineName", "unitType", quantity,
-            "dosageInstructions", "unitPrice", subtotal, "stockQuantity", "pharmacyId", "updatedAt"
+            "dosageInstructions", "unitPrice", subtotal, "stockQuantity", "businessId", "updatedAt"
           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           ON CONFLICT (id) DO NOTHING`,
           [
@@ -783,7 +825,7 @@ app.post("/api/transactions", authMiddleware, async (req, res) => {
             item.unitPrice,
             item.subtotal,
             item.stockQuantity,
-            tx.pharmacyId || null,
+            tx.businessId || null,
             now,
           ],
         );
@@ -827,57 +869,98 @@ app.get(
 
 // ===================== INVENTORY MOVEMENTS =====================
 // New hyphenated routes matching the sync engine's entity map. Movements
-// are append-only and now carry pharmacyId + updatedAt (see migration 028)
+// are append-only and now carry businessId + updatedAt (see migration 028)
 // so they can be scoped and since-filtered like everything else.
 app.get("/api/inventory-movements", authMiddleware, async (req, res) => {
-  const { pharmacyId, since } = req.query;
+  const businessId = req.query.businessId ?? req.query.pharmacyId;
+  const { since } = req.query;
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
 
-  if (pharmacyId && !accessibleIds.includes(pharmacyId)) {
+  if (businessId && !accessibleIds.includes(businessId)) {
     return res.status(403).json({ error: "Forbidden" });
   }
-  const scopedIds = pharmacyId ? [pharmacyId] : accessibleIds;
+  const scopedIds = businessId ? [businessId] : accessibleIds;
   if (scopedIds.length === 0) return res.json([]);
 
   const { rows } = await query(
-    `SELECT * FROM "inventory_movements" WHERE "updatedAt" > $1 AND "pharmacyId" = ANY($2::uuid[]) ORDER BY "updatedAt" ASC`,
+    `SELECT * FROM "inventory_movements" WHERE "updatedAt" > $1 AND "businessId" = ANY($2::uuid[]) ORDER BY "updatedAt" ASC`,
     [sinceOrEpoch(since), scopedIds],
   );
   res.json(rows);
 });
 
 app.post("/api/inventory-movements", authMiddleware, async (req, res) => {
-  const { id, medicineId, quantity, unitType, movementType, pharmacyId } =
-    req.body;
+  const {
+    id,
+    medicineId,
+    quantity,
+    unitType,
+    movementType,
+    businessId,
+    batchId,
+    batchNumber,
+    expiryDate,
+    supplier,
+    unitBuyingPrice,
+    transactionId,
+    createdAt,
+  } = req.body;
   const now = new Date().toISOString();
   const movementId = id || crypto.randomUUID();
-  await query(
-    `INSERT INTO "inventory_movements" (id, "medicineId", quantity, "unitType", "movementType", "pharmacyId", "createdAt", "updatedAt")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-     ON CONFLICT (id) DO NOTHING`,
+  const movementCreatedAt = createdAt || now;
+  const { rows } = await query(
+    `INSERT INTO "inventory_movements" (
+       id, "medicineId", quantity, "unitType", "movementType", "businessId",
+       "batchId", "batchNumber", "expiryDate", supplier, "unitBuyingPrice",
+       "transactionId", "createdAt", "updatedAt"
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+     ON CONFLICT (id) DO UPDATE SET
+       "batchId" = COALESCE("inventory_movements"."batchId", EXCLUDED."batchId"),
+       "batchNumber" = COALESCE("inventory_movements"."batchNumber", EXCLUDED."batchNumber"),
+       "expiryDate" = COALESCE("inventory_movements"."expiryDate", EXCLUDED."expiryDate"),
+       supplier = COALESCE("inventory_movements".supplier, EXCLUDED.supplier),
+       "unitBuyingPrice" = CASE
+         WHEN "inventory_movements"."unitBuyingPrice" = 0
+           THEN EXCLUDED."unitBuyingPrice"
+         ELSE "inventory_movements"."unitBuyingPrice"
+       END,
+       "transactionId" = COALESCE("inventory_movements"."transactionId", EXCLUDED."transactionId"),
+       "updatedAt" = EXCLUDED."updatedAt"
+     WHERE
+       ("inventory_movements"."batchId" IS NULL AND EXCLUDED."batchId" IS NOT NULL) OR
+       ("inventory_movements"."batchNumber" IS NULL AND EXCLUDED."batchNumber" IS NOT NULL) OR
+       ("inventory_movements"."expiryDate" IS NULL AND EXCLUDED."expiryDate" IS NOT NULL) OR
+       ("inventory_movements".supplier IS NULL AND EXCLUDED.supplier IS NOT NULL) OR
+       ("inventory_movements"."unitBuyingPrice" = 0 AND EXCLUDED."unitBuyingPrice" <> 0) OR
+       ("inventory_movements"."transactionId" IS NULL AND EXCLUDED."transactionId" IS NOT NULL)
+     RETURNING *`,
     [
       movementId,
       medicineId,
       quantity,
       unitType,
       movementType,
-      pharmacyId || null,
+      businessId || null,
+      batchId || null,
+      batchNumber || null,
+      expiryDate || null,
+      supplier || null,
+      Number(unitBuyingPrice) || 0,
+      transactionId || null,
+      movementCreatedAt,
       now,
     ],
   );
 
   await recomputeRemoteMedicineQuantity(medicineId);
 
-  res.json({
-    id: movementId,
-    medicineId,
-    quantity,
-    unitType,
-    movementType,
-    pharmacyId,
-    createdAt: now,
-    updatedAt: now,
-  });
+  if (rows[0]) return res.json(rows[0]);
+  const { rows: existingRows } = await query(
+    `SELECT * FROM "inventory_movements" WHERE id = $1`,
+    [movementId],
+  );
+  res.json(existingRows[0]);
 });
 
 // Legacy route had NO scoping at all — returned every movement across
@@ -887,7 +970,7 @@ app.get("/api/inventoryMovements", authMiddleware, async (req, res) => {
   if (accessibleIds.length === 0) return res.json([]);
 
   const { rows } = await query(
-    `SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL AND "pharmacyId" = ANY($1::uuid[]) ORDER BY "createdAt" DESC`,
+    `SELECT * FROM "inventory_movements" WHERE "deletedAt" IS NULL AND "businessId" = ANY($1::uuid[]) ORDER BY "createdAt" DESC`,
     [accessibleIds],
   );
   res.json(rows);
@@ -896,14 +979,205 @@ app.post("/api/inventoryMovements", authMiddleware, async (req, res) => {
   req.url = "/api/inventory-movements";
   app._router.handle(req, res);
 });
-app.delete("/api/inventoryMovements/:id", authMiddleware, async (req, res) => {
+
+async function handleUpdateInventoryMovement(req, res) {
+  const quantity = Number(req.body.quantity);
+  const unitBuyingPrice = Number(req.body.unitBuyingPrice);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    return res
+      .status(400)
+      .json({ error: "Restock quantity must be a positive whole number" });
+  }
+  if (!Number.isFinite(unitBuyingPrice) || unitBuyingPrice <= 0) {
+    return res
+      .status(400)
+      .json({ error: "Batch buying cost per unit must be greater than 0" });
+  }
+  for (const field of ["batchNumber", "expiryDate", "supplier"]) {
+    if (
+      req.body[field] !== undefined &&
+      req.body[field] !== null &&
+      typeof req.body[field] !== "string"
+    ) {
+      return res.status(400).json({ error: `${field} must be a string` });
+    }
+  }
+  if (
+    typeof req.body.expiryDate === "string" &&
+    req.body.expiryDate !== "" &&
+    !/^\d{4}-\d{2}-\d{2}$/.test(req.body.expiryDate)
+  ) {
+    return res
+      .status(400)
+      .json({ error: "Expiry date must use YYYY-MM-DD format" });
+  }
+
+  let client;
+  try {
+    const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+    client = await pool.connect();
+    await client.query("BEGIN");
+
+    const { rows } = await client.query(
+      `SELECT movement.*,
+              COALESCE(movement."businessId", product."businessId") AS "authorizedBusinessId"
+       FROM "inventory_movements" movement
+       LEFT JOIN products product ON product.id = movement."medicineId"
+       WHERE movement.id = $1 AND movement."deletedAt" IS NULL
+       FOR UPDATE OF movement`,
+      [req.params.id],
+    );
+    const movement = rows[0];
+    if (!movement) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ error: "Restock record not found" });
+    }
+    if (
+      movement.movementType !== "restock" ||
+      !movement.authorizedBusinessId ||
+      !accessibleIds.includes(movement.authorizedBusinessId)
+    ) {
+      await client.query("ROLLBACK");
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const batchNumber =
+      req.body.batchNumber === undefined
+        ? movement.batchNumber
+        : req.body.batchNumber?.trim() || null;
+    const expiryDate =
+      req.body.expiryDate === undefined
+        ? movement.expiryDate
+        : req.body.expiryDate || null;
+    const supplier =
+      req.body.supplier === undefined
+        ? movement.supplier
+        : req.body.supplier?.trim() || null;
+    const batchDetailsChanged =
+      (movement.batchNumber || null) !== batchNumber ||
+      (movement.expiryDate || null) !== expiryDate ||
+      (movement.supplier || null) !== supplier;
+
+    if (batchDetailsChanged && movement.batchId) {
+      const { rows: relatedMovements } = await client.query(
+        `SELECT id FROM "inventory_movements"
+         WHERE "batchId" = $1 AND id <> $2 AND "deletedAt" IS NULL
+         LIMIT 1`,
+        [movement.batchId, movement.id],
+      );
+      if (relatedMovements.length > 0) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({
+          error:
+            "Batch details cannot be changed because other stock movements already use this batch. Edit the quantity or cost only.",
+        });
+      }
+    }
+
+    const { rows: batchTotals } = await client.query(
+      `SELECT COALESCE(SUM(quantity), 0) AS quantity
+       FROM "inventory_movements"
+       WHERE "batchId" IS NOT DISTINCT FROM $1
+         AND "medicineId" = $2 AND "deletedAt" IS NULL`,
+      [movement.batchId, movement.medicineId],
+    );
+    const currentBatchQuantity = Number(batchTotals[0].quantity);
+    if (currentBatchQuantity - Number(movement.quantity) + quantity < 0) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({
+        error:
+          "Cannot reduce the restock quantity below the amount already used from this batch",
+      });
+    }
+
+    const now = new Date().toISOString();
+    const { rows: updatedRows } = await client.query(
+      `UPDATE "inventory_movements"
+       SET quantity = $1, "batchNumber" = $2, "expiryDate" = $3,
+           supplier = $4, "unitBuyingPrice" = $5, "updatedAt" = $6
+       WHERE id = $7
+       RETURNING *`,
+      [
+        quantity,
+        batchNumber,
+        expiryDate,
+        supplier,
+        unitBuyingPrice,
+        now,
+        movement.id,
+      ],
+    );
+    await client.query(
+      `UPDATE products SET quantity = (
+         SELECT COALESCE(SUM(quantity), 0) FROM "inventory_movements"
+         WHERE "medicineId" = $1 AND "deletedAt" IS NULL
+       ), "updatedAt" = $2 WHERE id = $1`,
+      [movement.medicineId, now],
+    );
+    await client.query("COMMIT");
+    res.json(updatedRows[0]);
+  } catch (error) {
+    if (client) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        console.error("Rollback inventory movement update failed:", rollbackError);
+      }
+    }
+    console.error("Update inventory movement error:", error);
+    res.status(500).json({ error: "Failed to update restock" });
+  } finally {
+    client?.release();
+  }
+}
+
+async function handleDeleteInventoryMovement(req, res) {
+  const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
+  const { rows } = await query(
+    `SELECT movement.id, movement."medicineId",
+            COALESCE(movement."businessId", product."businessId") AS "businessId"
+     FROM "inventory_movements" movement
+     LEFT JOIN products product ON product.id = movement."medicineId"
+     WHERE movement.id = $1`,
+    [req.params.id],
+  );
+  const movement = rows[0];
+  if (!movement) return res.status(404).json({ error: "Movement not found" });
+  if (!movement.businessId || !accessibleIds.includes(movement.businessId)) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
   const now = new Date().toISOString();
   await query(
-    `UPDATE "inventory_movements" SET "deletedAt" = $1, "updatedAt" = $1 WHERE id = $2`,
-    [now, req.params.id],
+    `UPDATE "inventory_movements"
+     SET "deletedAt" = COALESCE("deletedAt", $1), "updatedAt" = $1
+     WHERE id = $2`,
+    [now, movement.id],
   );
+  await recomputeRemoteMedicineQuantity(movement.medicineId);
   res.json({ success: true });
-});
+}
+
+app.delete(
+  "/api/inventory-movements/:id",
+  authMiddleware,
+  handleDeleteInventoryMovement,
+);
+app.put(
+  "/api/inventory-movements/:id",
+  authMiddleware,
+  handleUpdateInventoryMovement,
+);
+app.delete(
+  "/api/inventoryMovements/:id",
+  authMiddleware,
+  handleDeleteInventoryMovement,
+);
+app.put(
+  "/api/inventoryMovements/:id",
+  authMiddleware,
+  handleUpdateInventoryMovement,
+);
 app.get("/api/inventoryMovements/:medicineId", async (req, res) =>
   res.json(await getInventoryMovementsByMedicineId(req.params.medicineId)),
 );
@@ -926,14 +1200,14 @@ app.post("/api/settings", async (req, res) => {
 });
 
 // ===================== PHARMACY REGISTRATION =====================
-app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
-  const { name, address, contactNumber, phone, email, pharmacyCode } = req.body;
+app.post(["/api/register-business", "/api/register-pharmacy"], authMiddleware, async (req, res) => {
+  const { name, address, contactNumber, phone, email, pharmacyCode, } = req.body;
   const userId = req.user.id;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   await query(
-    'INSERT INTO "pharmacyInfo" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode") ' +
+    'INSERT INTO "businesses" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode") ' +
       "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     [
       id,
@@ -950,7 +1224,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
   );
 
   const result = await query(
-    'SELECT COUNT(*) FROM "pharmacyInfo" WHERE "userId" = $1',
+    'SELECT COUNT(*) FROM "businesses" WHERE "userId" = $1',
     [userId],
   );
   const pharmacyCount = parseInt(result.rows[0].count, 10);
@@ -1010,7 +1284,7 @@ app.post("/api/register-pharmacy", authMiddleware, async (req, res) => {
 // (admin's own single pharmacy, by userId) that existing UI code calls.
 // With `since`, returns the array of pharmacies this user's staff record
 // has access to that changed after the cursor — what the sync engine needs.
-app.get("/api/pharmacy", authMiddleware, async (req, res) => {
+app.get(["/api/businesses", "/api/pharmacy"], authMiddleware, async (req, res) => {
   const { since } = req.query;
 
   if (since !== undefined) {
@@ -1018,14 +1292,14 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
     if (accessibleIds.length === 0) return res.json([]);
 
     const { rows } = await query(
-      `SELECT * FROM "pharmacyInfo" WHERE ("userId" = $1 OR id = ANY($2::uuid[])) AND "updatedAt" > $3 ORDER BY "updatedAt" ASC`,
+      `SELECT * FROM "businesses" WHERE ("userId" = $1 OR id = ANY($2::uuid[])) AND "updatedAt" > $3 ORDER BY "updatedAt" ASC`,
       [req.user.id, accessibleIds, sinceOrEpoch(since)],
     );
     return res.json(rows);
   }
 
   const result = await query(
-    'SELECT * FROM "pharmacyInfo" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
+    'SELECT * FROM "businesses" WHERE "userId" = $1 ORDER BY "createdAt" DESC',
     [req.user.id],
   );
   const pharmacy = result.rows[0];
@@ -1033,24 +1307,24 @@ app.get("/api/pharmacy", authMiddleware, async (req, res) => {
   res.json(pharmacy);
 });
 
-app.get("/api/pharmacies", authMiddleware, async (req, res) => {
-  const result = await query('SELECT * FROM "pharmacyInfo"');
+app.get(["/api/all-businesses", "/api/pharmacies"], authMiddleware, async (req, res) => {
+  const result = await query('SELECT * FROM "businesses"');
   res.json(result.rows);
 });
 
-app.get("/api/me/pharmacies", authMiddleware, async (req, res) => {
+app.get(["/api/me/businesses", "/api/me/pharmacies"], authMiddleware, async (req, res) => {
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
   if (accessibleIds.length === 0) return res.json([]);
 
   const result = await query(
-    `SELECT * FROM "pharmacyInfo" WHERE id = ANY($1::uuid[]) AND "deletedAt" IS NULL`,
+    `SELECT * FROM "businesses" WHERE id = ANY($1::uuid[]) AND "deletedAt" IS NULL`,
     [accessibleIds],
   );
   res.json(result.rows);
 });
 
-app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
-  const result = await query('SELECT * FROM "pharmacyInfo" WHERE id = $1', [
+app.get(["/api/businesses/:id", "/api/pharmacy/:id"], authMiddleware, async (req, res) => {
+  const result = await query('SELECT * FROM "businesses" WHERE id = $1', [
     req.params.id,
   ]);
   const pharmacy = result.rows[0];
@@ -1063,7 +1337,7 @@ app.get("/api/pharmacy/:id", authMiddleware, async (req, res) => {
 // (`fields.push(\`name = '${name}'\`)`), which is a SQL injection hole:
 // a name like `', "isDeleted" = 1) --` would have been executed verbatim.
 async function updatePharmacyFields(id, updates) {
-  const { name, address, contactNumber, phone, email, pharmacyCode } = updates;
+  const { name, address, contactNumber, phone, email, pharmacyCode, businessType } = updates;
   const now = new Date().toISOString();
   const fields = [];
   const values = [];
@@ -1093,27 +1367,31 @@ async function updatePharmacyFields(id, updates) {
     fields.push(`"pharmacyCode" = $${index++}`);
     values.push(pharmacyCode);
   }
+  if (businessType !== undefined) {
+    fields.push(`"businessType" = $${index++}`);
+    values.push(businessType);
+  }
   fields.push(`"updatedAt" = $${index++}`);
   values.push(now);
   values.push(id);
 
   await query(
-    `UPDATE "pharmacyInfo" SET ${fields.join(", ")} WHERE id = $${index}`,
+    `UPDATE "businesses" SET ${fields.join(", ")} WHERE id = $${index}`,
     values,
   );
 }
 
 // Body-based — kept for the existing web-build caller (data-services.ts's
-// updatePharmacy sends pharmacyId in the body, not the URL).
-app.put("/api/pharmacy", authMiddleware, async (req, res) => {
-  await updatePharmacyFields(req.body.pharmacyId, req.body);
+// updatePharmacy sends businessId in the body, not the URL).
+app.put(["/api/businesses", "/api/pharmacy"], authMiddleware, async (req, res) => {
+  await updatePharmacyFields(req.body.businessId, req.body);
   res.json({ success: true });
 });
 
 // Path-based — this is what the generic sync engine calls
 // (ENTITY_ENDPOINTS.pharmacy + "/" + record.id) once a pharmacy has
 // already been synced at least once (lastSyncedAt is set).
-app.put("/api/pharmacy/:id", authMiddleware, async (req, res) => {
+app.put(["/api/businesses/:id", "/api/pharmacy/:id"], authMiddleware, async (req, res) => {
   await updatePharmacyFields(req.params.id, req.body);
   res.json({ success: true });
 });
@@ -1124,17 +1402,17 @@ app.put("/api/pharmacy/:id", authMiddleware, async (req, res) => {
 // creates the first admin staff row — that side effect stays exclusive
 // to the explicit registration flow, not the generic sync path. The
 // client already generated the id locally, so this insert is id-idempotent.
-app.post("/api/pharmacy", authMiddleware, async (req, res) => {
-  const { id, name, address, phone, email, pharmacyCode } = req.body;
+app.post(["/api/businesses", "/api/pharmacy"], authMiddleware, async (req, res) => {
+  const { id, name, address, phone, email, pharmacyCode, businessType } = req.body;
   const now = new Date().toISOString();
-  const pharmacyId = id || crypto.randomUUID();
+  const businessId = id || crypto.randomUUID();
 
   await query(
-    `INSERT INTO "pharmacyInfo" (id, name, address, phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode")
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
+    `INSERT INTO "businesses" (id, name, address, phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode", "businessType")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8, $9)
      ON CONFLICT (id) DO NOTHING`,
     [
-      pharmacyId,
+      businessId,
       name,
       address,
       phone || "",
@@ -1142,16 +1420,18 @@ app.post("/api/pharmacy", authMiddleware, async (req, res) => {
       req.user.id,
       now,
       pharmacyCode || null,
+      businessType,
     ],
   );
 
   res.json({
-    id: pharmacyId,
+    id: businessId,
     name,
     address,
     phone,
     email,
     pharmacyCode,
+    businessType,
     userId: req.user.id,
     createdAt: now,
     updatedAt: now,
@@ -1164,11 +1444,41 @@ function isBcryptHash(value) {
 }
 
 app.post("/api/staff", authMiddleware, async (req, res) => {
-  const { id, userName, role, contactNumber, pin, pharmacyId, pharmacyIds } =
+  const { id, userName, role, contactNumber, pin, businessId, pharmacyIds } =
     req.body;
   const staffId = id || crypto.randomUUID();
   const now = new Date().toISOString();
-  const resolvedPharmacyIds = pharmacyIds || (pharmacyId ? [pharmacyId] : []);
+  const resolvedPharmacyIds = pharmacyIds || (businessId ? [businessId] : []);
+
+  const licenseResult = await pool.query(
+    `SELECT "maxUsers" FROM licenses
+     WHERE "userId" = $1 AND "paymentStatus" = 'completed'
+       AND status IN ('paid', 'active') AND expiresAt > NOW()
+     ORDER BY expiresAt DESC LIMIT 1`,
+    [req.user.id],
+  );
+  if (licenseResult.rows.length > 0) {
+    const staffCountResult = await pool.query(
+      `SELECT COUNT(DISTINCT s.id)::INTEGER AS count
+       FROM staff s
+      JOIN "businesses" p ON s."pharmacyIds" ? p.id::text
+       WHERE p."userId" = $1 AND p."deletedAt" IS NULL
+         AND s."deletedAt" IS NULL`,
+      [req.user.id],
+    );
+    const existingStaff = Number(staffCountResult.rows[0].count);
+    const alreadyExists = await pool.query(
+      "SELECT 1 FROM staff WHERE id = $1",
+      [staffId],
+    );
+    if (
+      !alreadyExists.rows.length &&
+      existingStaff >= licenseResult.rows[0].maxUsers
+    ) {
+      return res.status(403).json({ error: "Max staff users reached" });
+    }
+  }
+
   // The sync engine pushes a PIN that's already bcrypt-hashed locally
   // (see sync-repository.js's addStaff). The plain web registration flow
   // sends a raw PIN needing to be hashed here. Detect which case this is
@@ -1206,7 +1516,7 @@ app.post("/api/staff", authMiddleware, async (req, res) => {
 // (ENTITY_ENDPOINTS.staff = "/api/staff", so it calls this with no id
 // segment). Scopes server-side to every pharmacy the authenticated
 // user's staff record has access to, rather than requiring the client
-// to already know which pharmacyId to ask about.
+// to already know which businessId to ask about.
 app.get("/api/staff", authMiddleware, async (req, res) => {
   const { since } = req.query;
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
@@ -1222,9 +1532,9 @@ app.get("/api/staff", authMiddleware, async (req, res) => {
 // since-filtered pull returns an array (possibly empty — NOT a 404, the
 // old behavior broke every sync cycle where nothing had changed since
 // last pull, since an empty array is a completely normal, expected result).
-app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
+app.get("/api/staff/:businessId", authMiddleware, async (req, res) => {
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
-  if (!accessibleIds.includes(req.params.pharmacyId)) {
+  if (!accessibleIds.includes(req.params.businessId)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
@@ -1233,14 +1543,14 @@ app.get("/api/staff/:pharmacyId", authMiddleware, async (req, res) => {
   if (since !== undefined) {
     const { rows } = await query(
       `SELECT * FROM staff WHERE "pharmacyIds" ? $1 AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
-      [req.params.pharmacyId, sinceOrEpoch(since)],
+      [req.params.businessId, sinceOrEpoch(since)],
     );
     return res.json(rows);
   }
 
   const { rows } = await query(
     `SELECT * FROM staff WHERE "pharmacyIds" ? $1 AND "deletedAt" IS NULL ORDER BY "createdAt" DESC`,
-    [req.params.pharmacyId],
+    [req.params.businessId],
   );
   res.json(rows);
 });
@@ -1362,8 +1672,11 @@ app.get("/api/users", authMiddleware, adminCheck, async (req, res) => {
 // ===================== LICENSES (paid) =====================
 app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
   try {
-    const { plan, maxMachines, expiresAt, phone, amount, productCode } =
-      req.body;
+    const { plan, expiresAt, phone, productCode } = req.body;
+    const planLimits = LICENSE_PLANS[plan];
+    if (!planLimits)
+      return res.status(400).json({ error: "Invalid license plan" });
+
     const reference = generateMarzPar();
     const { key: licenseKey, productCode: storedProductCode } =
       generateLicenseKey(productCode);
@@ -1371,18 +1684,19 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
 
     await pool.query(
       `INSERT INTO licenses
-       (id, licenseKey, plan, maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      (id, licenseKey, plan, "maxUsers", maxMachines, expiresAt, machineIds, status, "paymentReference", amount, phone, "productCode", "userId")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
         id,
         licenseKey,
         plan,
-        maxMachines,
+        planLimits.maxUsers,
+        planLimits.maxMachines,
         expiresAt ? new Date(expiresAt) : null,
         [],
         "inactive",
         reference,
-        amount,
+        planLimits.amount,
         phone,
         storedProductCode,
         req.user.id,
@@ -1392,7 +1706,7 @@ app.post("/api/licenses", limiter, authMiddleware, async (req, res) => {
     await axios.post(
       `${process.env.MARZ_API_URL}/collect-money`,
       {
-        amount,
+        amount: planLimits.amount,
         phone_number: `${phone}`,
         country: "UG",
         reference: `${reference}`,
@@ -1510,6 +1824,7 @@ app.post("/api/licenses/activate", limiter, async (req, res) => {
       plan: license.plan,
       machineIds: machineId,
       maxMachines: license.maxmachines,
+      maxUsers: license.maxUsers,
       expiresAt: license.expiresat,
     };
     const licenseKeyPrefix = (license.licensekey || "DWF").split("-")[0];
@@ -1565,15 +1880,15 @@ app.get("/api/expenses", authMiddleware, async (req, res) => {
   if (accessibleIds.length === 0) return res.json([]);
 
   const { rows } = await query(
-    `SELECT * FROM expenses WHERE "pharmacyId" = ANY($1::uuid[]) AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
+    `SELECT * FROM expenses WHERE "businessId" = ANY($1::uuid[]) AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
     [accessibleIds, sinceOrEpoch(since)],
   );
   res.json(rows);
 });
 
-app.get("/api/expenses/:pharmacyId", authMiddleware, async (req, res) => {
+app.get("/api/expenses/:businessId", authMiddleware, async (req, res) => {
   const accessibleIds = await getAccessiblePharmacyIds(req.user.id);
-  if (!accessibleIds.includes(req.params.pharmacyId)) {
+  if (!accessibleIds.includes(req.params.businessId)) {
     return res.status(403).json({ error: "Forbidden" });
   }
 
@@ -1581,28 +1896,28 @@ app.get("/api/expenses/:pharmacyId", authMiddleware, async (req, res) => {
 
   if (since !== undefined) {
     const { rows } = await query(
-      `SELECT * FROM expenses WHERE "pharmacyId" = $1 AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
-      [req.params.pharmacyId, sinceOrEpoch(since)],
+      `SELECT * FROM expenses WHERE "businessId" = $1 AND "updatedAt" > $2 ORDER BY "updatedAt" ASC`,
+      [req.params.businessId, sinceOrEpoch(since)],
     );
     return res.json(rows);
   }
 
   const { rows } = await query(
-    `SELECT * FROM expenses WHERE "pharmacyId" = $1 AND "deletedAt" IS NULL ORDER BY "createdAt" DESC`,
-    [req.params.pharmacyId],
+    `SELECT * FROM expenses WHERE "businessId" = $1 AND "deletedAt" IS NULL ORDER BY "createdAt" DESC`,
+    [req.params.businessId],
   );
   res.json(rows);
 });
 
 app.post("/api/expenses", authMiddleware, async (req, res) => {
-  const { id, description, amount, pharmacyId, notes, category, date } =
+  const { id, description, amount, businessId, notes, category, date } =
     req.body;
   const expenseId = id || crypto.randomUUID();
   const now = new Date().toISOString();
   try {
     await query(
-      'INSERT INTO expenses (id, description, amount, notes, category, date, "pharmacyId", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) ON CONFLICT (id) DO NOTHING',
-      [expenseId, description, amount, notes, category, date, pharmacyId, now],
+      'INSERT INTO expenses (id, description, amount, notes, category, date, "businessId", "createdAt", "updatedAt") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8) ON CONFLICT (id) DO NOTHING',
+      [expenseId, description, amount, notes, category, date, businessId, now],
     );
     res.json({
       id: expenseId,
@@ -1611,7 +1926,7 @@ app.post("/api/expenses", authMiddleware, async (req, res) => {
       notes,
       category,
       date,
-      pharmacyId,
+      businessId,
       createdAt: now,
       updatedAt: now,
     });
@@ -1619,7 +1934,7 @@ app.post("/api/expenses", authMiddleware, async (req, res) => {
     if (err.code === "23503") {
       return res.status(409).json({
         error: "PARENT_NOT_SYNCED",
-        message: `Referenced pharmacy (${pharmacyId}) does not exist on this server yet`,
+        message: `Referenced pharmacy (${businessId}) does not exist on this server yet`,
       });
     }
     console.error("Add expense error:", err);

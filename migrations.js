@@ -563,6 +563,25 @@ async function runMigrations(client) {
       },
     },
     {
+      name: "029_add_max_users_to_licenses",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE licenses
+          ADD COLUMN IF NOT EXISTS "maxUsers" INTEGER NOT NULL DEFAULT 1;
+        `);
+        await client.query(`
+          UPDATE licenses
+          SET "maxUsers" = CASE plan
+            WHEN 'Starter' THEN 2
+            WHEN 'Growth' THEN 5
+            WHEN 'Business' THEN 10
+            ELSE "maxUsers"
+          END
+          WHERE plan IN ('Starter', 'Growth', 'Business');
+        `);
+      },
+    },
+    {
       name: "029_add_pharmacy_dispenser_role",
       up: async (client) => {
         // Drop the existing CHECK constraint
@@ -705,6 +724,134 @@ async function runMigrations(client) {
         await client.query(`
           ALTER TABLE contact_form
           ADD COLUMN IF NOT EXISTS "status" TEXT NOT NULL DEFAULT 'pending';
+        `);
+      },
+    },
+    {
+      name: "037_allow_catalog_product_types",
+      up: async (client) => {
+        // Postgres can just drop the CHECK constraint — no table rebuild needed like SQLite.
+        await client.query(`
+          ALTER TABLE medicines DROP CONSTRAINT IF EXISTS "medicines_unitType_check";
+        `);
+
+        await client.query(`
+          ALTER TABLE medicines
+          ADD COLUMN IF NOT EXISTS "syncStatus" TEXT NOT NULL DEFAULT 'SYNCED';
+        `);
+        await client.query(`
+          ALTER TABLE medicines
+          ADD COLUMN IF NOT EXISTS "lastSyncedAt" TIMESTAMP;
+        `);
+      },
+    },
+    {
+      name: "038_add_businessType_to_pharmacyInfo",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE "pharmacyInfo"
+          ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'pharmacy';
+        `);
+      },
+    },
+    {
+      name: "039_add_catalog_fields_to_medicines",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE medicines
+          ADD COLUMN IF NOT EXISTS "businessType" TEXT NOT NULL DEFAULT 'pharmacy';
+        `);
+        await client.query(`
+          ALTER TABLE medicines
+          ADD COLUMN IF NOT EXISTS "productType" TEXT;
+        `);
+        await client.query(`
+          UPDATE medicines SET "productType" = "unitType" WHERE "productType" IS NULL;
+        `);
+      },
+    },
+    {
+      name: "040_add_batch_tracking_to_inventory_movements",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE "inventory_movements"
+            ADD COLUMN IF NOT EXISTS "batchId" UUID,
+            ADD COLUMN IF NOT EXISTS "batchNumber" TEXT,
+            ADD COLUMN IF NOT EXISTS "expiryDate" DATE,
+            ADD COLUMN IF NOT EXISTS supplier TEXT,
+            ADD COLUMN IF NOT EXISTS "unitBuyingPrice" DECIMAL(10,2) NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS "transactionId" UUID;
+        `);
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS "idx_inventory_movements_batchId"
+            ON "inventory_movements"("batchId");
+        `);
+        await client.query(`
+          CREATE INDEX IF NOT EXISTS "idx_inventory_movements_transactionId"
+            ON "inventory_movements"("transactionId");
+        `);
+      },
+    },
+    {
+      name: "041_allow_null_medicine_expiry",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE medicines
+          ALTER COLUMN "expiryDate" DROP NOT NULL;
+        `);
+      },
+    },
+    {
+      name: "042_rename_medicines_and_pharmacy_info",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE medicines RENAME TO products;
+          ALTER TABLE "pharmacyInfo" RENAME TO businesses;
+
+          ALTER TABLE products RENAME COLUMN "pharmacyId" TO "businessId";
+          ALTER TABLE transactions RENAME COLUMN "pharmacyId" TO "businessId";
+          ALTER TABLE "transactionItems" RENAME COLUMN "pharmacyId" TO "businessId";
+          ALTER TABLE "inventory_movements" RENAME COLUMN "pharmacyId" TO "businessId";
+          ALTER TABLE expenses RENAME COLUMN "pharmacyId" TO "businessId";
+
+          DROP INDEX IF EXISTS "idx_medicines_updatedAt";
+          DROP INDEX IF EXISTS "idx_medicines_pharmacyId";
+          DROP INDEX IF EXISTS "idx_inventory_movements_pharmacyId";
+          CREATE INDEX IF NOT EXISTS "idx_products_updatedAt" ON products("updatedAt");
+          CREATE INDEX IF NOT EXISTS "idx_products_businessId" ON products("businessId");
+          CREATE INDEX IF NOT EXISTS "idx_transactions_businessId" ON transactions("businessId");
+          CREATE INDEX IF NOT EXISTS "idx_inventory_movements_businessId"
+            ON "inventory_movements"("businessId");
+          CREATE INDEX IF NOT EXISTS "idx_expenses_businessId" ON expenses("businessId");
+        `);
+      },
+    },
+    {
+      name: "043_add_custom_product_packaging",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE products
+          ADD COLUMN IF NOT EXISTS "customProductType" TEXT,
+          ADD COLUMN IF NOT EXISTS "customPackagingValues" TEXT;
+          `)
+      }
+    },
+    {
+      name: "044_store_batch_ids_as_text",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE "inventory_movements"
+          ALTER COLUMN "batchId" TYPE TEXT USING "batchId"::text;
+        `);
+      },
+    },
+    {
+      name: "045_store_custom_product_type_as_text",
+      up: async (client) => {
+        await client.query(`
+          ALTER TABLE products
+          ALTER COLUMN "customProductType" TYPE TEXT
+          USING "customProductType"::text;
         `);
       },
     },
