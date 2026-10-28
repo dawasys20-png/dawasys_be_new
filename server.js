@@ -54,9 +54,9 @@ const limiter = rateLimit({
 });
 
 const LICENSE_PLANS = {
-  Starter: { maxUsers: 2, maxMachines: 1, amount: 250000 },
-  Growth: { maxUsers: 5, maxMachines: 3, amount: 450000 },
-  Business: { maxUsers: 10, maxMachines: 5, amount: 650000 },
+  starter: { maxUsers: 2, maxMachines: 2, amount: 250000 },
+  professional: { maxUsers: 5, maxMachines: 5, amount: 450000 },
+  enterprise: { maxUsers: 10, maxMachines: 10, amount: 650000 },
 };
 
 // setInterval(() => {
@@ -276,7 +276,9 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       JOIN "businesses" p ON p.id = ANY(
         ARRAY(SELECT jsonb_array_elements_text(s."pharmacyIds")::uuid)
       )
-      WHERE s."userName" = $1 AND p.id = $2 AND s."deletedAt" IS NULL
+      WHERE s."userName" = $1
+        AND (p.id::text = $2 OR p."pharmacyCode" = $2)
+        AND s."deletedAt" IS NULL
       `,
       [username, businessId],
     );
@@ -289,7 +291,7 @@ app.post("/api/login-staff", limiter, async (req, res) => {
       return res.status(401).json({ error: "Invalid credentials" });
 
     const pharmacyResult = await query(
-      `SELECT * FROM "businesses" WHERE id = $1`,
+      `SELECT * FROM "businesses" WHERE id::text = $1 OR "pharmacyCode" = $1`,
       [businessId],
     );
     const pharmacy = pharmacyResult.rows[0];
@@ -1201,14 +1203,22 @@ app.post("/api/settings", async (req, res) => {
 
 // ===================== PHARMACY REGISTRATION =====================
 app.post(["/api/register-business", "/api/register-pharmacy"], authMiddleware, async (req, res) => {
-  const { name, address, contactNumber, phone, email, pharmacyCode, } = req.body;
+  const {
+    name,
+    address,
+    contactNumber,
+    phone,
+    email,
+    pharmacyCode,
+    businessType = "pharmacy",
+  } = req.body;
   const userId = req.user.id;
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   await query(
-    'INSERT INTO "businesses" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode") ' +
-      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+    'INSERT INTO "businesses" (id, name, address, "contactNumber", phone, email, "userId", "createdAt", "updatedAt", "pharmacyCode", "businessType") ' +
+      "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     [
       id,
       name,
@@ -1220,6 +1230,7 @@ app.post(["/api/register-business", "/api/register-pharmacy"], authMiddleware, a
       now,
       now,
       pharmacyCode,
+      businessType,
     ],
   );
 
@@ -1272,6 +1283,7 @@ app.post(["/api/register-business", "/api/register-pharmacy"], authMiddleware, a
       phone,
       email,
       pharmacyCode,
+      businessType,
       createdAt: now,
       updatedAt: now,
     },
